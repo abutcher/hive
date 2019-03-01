@@ -126,7 +126,7 @@ type SyncStatus struct {
 	// Name is the name of the object that was synced or patched.
 	Name string `json:"name"`
 
-	// Namespace is the Namespace of the object
+	// Namespace is the Namespace of the object that was synced or patched.
 	Namespace string `json:"namespace"`
 
 	// Hash is the unique md5 hash of the resource or patch.

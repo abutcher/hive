@@ -21,13 +21,26 @@ import (
 
 	"github.com/onsi/gomega"
 	"golang.org/x/net/context"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestStorageSyncSet(t *testing.T) {
 	key := types.NamespacedName{Name: "foo", Namespace: "default"}
-	created := &SyncSet{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"}}
+	created := &SyncSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+		},
+		Spec: SyncSetSpec{
+			ClusterDeploymentRefs: []corev1.LocalObjectReference{
+				{
+					Name: "foo",
+				},
+			},
+		},
+	}
 	g := gomega.NewGomegaWithT(t)
 
 	// Test Create
@@ -52,7 +65,19 @@ func TestStorageSyncSet(t *testing.T) {
 
 func TestStorageSelectorSyncSet(t *testing.T) {
 	key := types.NamespacedName{Name: "foo", Namespace: "default"}
-	created := &SelectorSyncSet{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"}}
+	created := &SelectorSyncSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+		},
+		Spec: SelectorSyncSetSpec{
+			ClusterDeploymentSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"foo": "bar",
+				},
+			},
+		},
+	}
 	g := gomega.NewGomegaWithT(t)
 
 	// Test Create
