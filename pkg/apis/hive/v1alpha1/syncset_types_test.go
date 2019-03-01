@@ -64,11 +64,10 @@ func TestStorageSyncSet(t *testing.T) {
 }
 
 func TestStorageSelectorSyncSet(t *testing.T) {
-	key := types.NamespacedName{Name: "foo", Namespace: "default"}
+	key := types.NamespacedName{Name: "foo"}
 	created := &SelectorSyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "foo",
-			Namespace: "default",
+			Name: "foo",
 		},
 		Spec: SelectorSyncSetSpec{
 			ClusterDeploymentSelector: metav1.LabelSelector{
