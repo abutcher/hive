@@ -267,6 +267,37 @@ func (r *ReconcileSyncSet) Reconcile(request reconcile.Request) (reconcile.Resul
 
 	for _, syncSet := range syncSets {
 		ssLog := cdLog.WithFields(log.Fields{"syncSet": syncSet.Name})
+
+		if syncSet.DeletionTimestamp != nil {
+			if controllerutils.HasFinalizer(&syncSet, hivev1.FinalizerSyncSetCleanup) {
+				// Delete syncset resources
+				if syncSet.Spec.ResourceDeletionPolicy != hivev1.OrphanResourceDeletionPolicy {
+					syncSetStatus := findSyncSetStatus(syncSet.Name, cd.Status.SyncSetStatus)
+					err := r.deleteSyncSetResources(syncSet.Spec.Resources, syncSetStatus, dynamicClient, ssLog)
+					if err != nil {
+						ssLog.WithError(err).Error("unable to cleanup syncset resources")
+					}
+				}
+				// Remove syncset status from clusterdeployment
+				cd.Status.SyncSetStatus = removeSyncSetObjectStatus(cd.Status.SyncSetStatus, syncSet.Name)
+				if err := r.removeSyncSetFinalizer(&syncSet); err != nil {
+					ssLog.WithError(err).Error("unable to remove finalizer")
+					return reconcile.Result{}, err
+				}
+				continue
+			}
+		}
+
+		// Add syncset cleanup finalizer if not present
+		if !controllerutils.HasFinalizer(&syncSet, hivev1.FinalizerSyncSetCleanup) {
+			ssLog.Debugf("adding syncset finalizer")
+			if err := r.addSyncSetFinalizer(&syncSet); err != nil {
+				ssLog.WithError(err).Error("error adding finalizer")
+				return reconcile.Result{}, err
+			}
+			continue
+		}
+
 		ssLog.Debug("applying sync set")
 
 		syncSetStatus := findSyncSetStatus(syncSet.Name, cd.Status.SyncSetStatus)
@@ -293,6 +324,37 @@ func (r *ReconcileSyncSet) Reconcile(request reconcile.Request) (reconcile.Resul
 
 	for _, selectorSyncSet := range selectorSyncSets {
 		ssLog := cdLog.WithFields(log.Fields{"selectorSyncSet": selectorSyncSet.Name})
+
+		if selectorSyncSet.DeletionTimestamp != nil {
+			if controllerutils.HasFinalizer(&selectorSyncSet, hivev1.FinalizerSyncSetCleanup) {
+				// Delete syncset resources
+				if selectorSyncSet.Spec.ResourceDeletionPolicy != hivev1.OrphanResourceDeletionPolicy {
+					syncSetStatus := findSyncSetStatus(selectorSyncSet.Name, cd.Status.SyncSetStatus)
+					err := r.deleteSyncSetResources(selectorSyncSet.Spec.Resources, syncSetStatus, dynamicClient, ssLog)
+					if err != nil {
+						ssLog.WithError(err).Error("unable to cleanup syncset resources")
+					}
+				}
+				// Remove syncset status from clusterdeployment
+				cd.Status.SyncSetStatus = removeSyncSetObjectStatus(cd.Status.SyncSetStatus, selectorSyncSet.Name)
+				if err := r.removeSelectorSyncSetFinalizer(&selectorSyncSet); err != nil {
+					ssLog.WithError(err).Error("unable to remove finalizer")
+					return reconcile.Result{}, err
+				}
+				continue
+			}
+		}
+
+		// Add syncset cleanup finalizer if not present
+		if !controllerutils.HasFinalizer(&selectorSyncSet, hivev1.FinalizerSyncSetCleanup) {
+			ssLog.Debugf("adding syncset finalizer")
+			if err := r.addSelectorSyncSetFinalizer(&selectorSyncSet); err != nil {
+				ssLog.WithError(err).Error("error adding finalizer")
+				return reconcile.Result{}, err
+			}
+			continue
+		}
+
 		ssLog.Debug("applying selector sync set")
 
 		syncSetStatus := findSyncSetStatus(selectorSyncSet.Name, cd.Status.SelectorSyncSetStatus)
@@ -565,6 +627,32 @@ func (r *ReconcileSyncSet) reconcileDeletedSyncSetResources(applyMode hivev1.Syn
 	return newStatusList, nil
 }
 
+func (r *ReconcileSyncSet) deleteSyncSetResources(ssResources []runtime.RawExtension, syncSetStatus hivev1.SyncSetObjectStatus, dynamicClient dynamic.Interface, ssLog log.FieldLogger) error {
+	for _, resourceStatus := range syncSetStatus.Resources {
+		itemLog := ssLog.WithField("resource", fmt.Sprintf("%s/%s", resourceStatus.Namespace, resourceStatus.Name)).
+			WithField("apiversion", resourceStatus.APIVersion).
+			WithField("kind", resourceStatus.Kind)
+		gv, err := schema.ParseGroupVersion(resourceStatus.APIVersion)
+		if err != nil {
+			// continue instead if the goal is a brute force cleanup?
+			return err
+		}
+		gvr := gv.WithResource(resourceStatus.Resource)
+		itemLog.Debug("deleting resource")
+		err = dynamicClient.Resource(gvr).Namespace(resourceStatus.Namespace).Delete(resourceStatus.Name, &metav1.DeleteOptions{})
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				itemLog.WithError(err).Error("error deleting resource")
+				// what should we do when we encounter an error deleting resources for cleanup? set deletionfailed status?
+				// existingStatusList[index].Conditions = r.setDeletionFailedSyncCondition(existingStatusList[index].Conditions, err)
+			} else {
+				itemLog.Debug("resource not found, nothing to do")
+			}
+		}
+	}
+	return nil
+}
+
 func appendOrUpdateSyncStatus(statusList []hivev1.SyncStatus, syncStatus hivev1.SyncStatus) []hivev1.SyncStatus {
 	for i, ss := range statusList {
 		if ss.Name == syncStatus.Name && ss.Namespace == syncStatus.Namespace && ss.Kind == syncStatus.Kind {
@@ -592,6 +680,16 @@ func findSyncSetStatus(name string, statusList []hivev1.SyncSetObjectStatus) hiv
 		}
 	}
 	return hivev1.SyncSetObjectStatus{Name: name}
+}
+
+func removeSyncSetObjectStatus(statusList []hivev1.SyncSetObjectStatus, syncSetName string) []hivev1.SyncSetObjectStatus {
+	for i := 0; i < len(statusList); i++ {
+		if statusList[i].Name == syncSetName {
+			statusList = append(statusList[:i], statusList[i+1:]...)
+			i--
+		}
+	}
+	return statusList
 }
 
 func (r *ReconcileSyncSet) updateClusterDeploymentStatus(cd *hivev1.ClusterDeployment, origCD *hivev1.ClusterDeployment, cdLog log.FieldLogger) error {
@@ -800,4 +898,28 @@ func (r *ReconcileSyncSet) migrateSelectorSyncSetPatchTypes(items []hivev1.Selec
 		}
 	}
 	return nil
+}
+
+func (r *ReconcileSyncSet) addSyncSetFinalizer(ss *hivev1.SyncSet) error {
+	ss = ss.DeepCopy()
+	controllerutils.AddFinalizer(ss, hivev1.FinalizerSyncSetCleanup)
+	return r.Update(context.TODO(), ss)
+}
+
+func (r *ReconcileSyncSet) removeSyncSetFinalizer(ss *hivev1.SyncSet) error {
+	ss = ss.DeepCopy()
+	controllerutils.DeleteFinalizer(ss, hivev1.FinalizerSyncSetCleanup)
+	return r.Update(context.TODO(), ss)
+}
+
+func (r *ReconcileSyncSet) addSelectorSyncSetFinalizer(ss *hivev1.SelectorSyncSet) error {
+	ss = ss.DeepCopy()
+	controllerutils.AddFinalizer(ss, hivev1.FinalizerSyncSetCleanup)
+	return r.Update(context.TODO(), ss)
+}
+
+func (r *ReconcileSyncSet) removeSelectorSyncSetFinalizer(ss *hivev1.SelectorSyncSet) error {
+	ss = ss.DeepCopy()
+	controllerutils.DeleteFinalizer(ss, hivev1.FinalizerSyncSetCleanup)
+	return r.Update(context.TODO(), ss)
 }

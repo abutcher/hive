@@ -552,8 +552,9 @@ func testClusterDeployment(syncSetStatus []hivev1.SyncSetObjectStatus, selectorS
 func testSyncSet(name string, resources []runtime.Object, patches []hivev1.SyncObjectPatch) *hivev1.SyncSet {
 	ss := &hivev1.SyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
+			Name:       name,
+			Namespace:  testNamespace,
+			Finalizers: []string{hivev1.FinalizerSyncSetCleanup},
 		},
 		Spec: hivev1.SyncSetSpec{
 			ClusterDeploymentRefs: []corev1.LocalObjectReference{
@@ -577,8 +578,9 @@ func testSyncSet(name string, resources []runtime.Object, patches []hivev1.SyncO
 func testSyncSetWithResources(name string, resources ...runtime.Object) *hivev1.SyncSet {
 	ss := &hivev1.SyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
+			Name:       name,
+			Namespace:  testNamespace,
+			Finalizers: []string{hivev1.FinalizerSyncSetCleanup},
 		},
 		Spec: hivev1.SyncSetSpec{
 			ClusterDeploymentRefs: []corev1.LocalObjectReference{
@@ -599,8 +601,9 @@ func testSyncSetWithResources(name string, resources ...runtime.Object) *hivev1.
 func testSyncSetWithPatches(name string, patches ...hivev1.SyncObjectPatch) *hivev1.SyncSet {
 	ss := &hivev1.SyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
+			Name:       name,
+			Namespace:  testNamespace,
+			Finalizers: []string{hivev1.FinalizerSyncSetCleanup},
 		},
 		Spec: hivev1.SyncSetSpec{
 			ClusterDeploymentRefs: []corev1.LocalObjectReference{
@@ -640,7 +643,8 @@ func testNonMatchingSelectorSyncSetWithResources(name string, resources ...runti
 func testSelectorSyncSetWithResources(name string, matchLabels map[string]string, resources ...runtime.Object) *hivev1.SelectorSyncSet {
 	ss := &hivev1.SelectorSyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:       name,
+			Finalizers: []string{hivev1.FinalizerSyncSetCleanup},
 		},
 		Spec: hivev1.SelectorSyncSetSpec{
 			ClusterDeploymentSelector: metav1.LabelSelector{
@@ -667,7 +671,8 @@ func testNonMatchingSelectorSyncSetWithPatches(name string, patches ...hivev1.Sy
 func testSelectorSyncSetWithPatches(name string, matchLabels map[string]string, patches ...hivev1.SyncObjectPatch) *hivev1.SelectorSyncSet {
 	ss := &hivev1.SelectorSyncSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:       name,
+			Finalizers: []string{hivev1.FinalizerSyncSetCleanup},
 		},
 		Spec: hivev1.SelectorSyncSetSpec{
 			ClusterDeploymentSelector: metav1.LabelSelector{

@@ -22,6 +22,25 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+const (
+	// FinalizerSyncSetCleanup is used on SyncSets to ensure we delete or
+	// orphan resources in clusters that the SyncSet applies to.
+	FinalizerSyncSetCleanup string = "hive.openshift.io/syncsetcleanup"
+)
+
+// SyncSetResourceDeletionPolicy is a string representing the policy to use
+// when cleaning up SyncSet resources.
+type SyncSetResourceDeletionPolicy string
+
+const (
+	// DeleteResourceDeletionPolicy indicates that resources will be deleted.
+	DeleteResourceDeletionPolicy SyncSetResourceDeletionPolicy = "Delete"
+
+	// OrphanResourceDeletionPolicy indicates that resources will be orphaned
+	// and left in place on related clusters.
+	OrphanResourceDeletionPolicy SyncSetResourceDeletionPolicy = "Orphan"
+)
+
 // SyncSetResourceApplyMode is a string representing the mode with which to
 // apply SyncSet Resources.
 type SyncSetResourceApplyMode string
@@ -181,6 +200,11 @@ type SyncSetCommonSpec struct {
 	// ApplyMode "sync" indicates create, update and delete.
 	// +optional
 	ResourceApplyMode SyncSetResourceApplyMode `json:"resourceApplyMode,omitempty"`
+
+	// ResourceDeletionPolicy indicates if the resource deletion policy is "delete" (default) or "orphan".
+	// DeletionPolicy "delete" indicates that resources will be deleted.
+	// DeletionPolicy "orphan" indicates that resources will be orhpaned and no resource cleanup will occur.
+	ResourceDeletionPolicy SyncSetResourceDeletionPolicy `json:"resourceDeletionPolicy,omitempty"`
 
 	// Patches is the list of patches to apply.
 	// +optional
