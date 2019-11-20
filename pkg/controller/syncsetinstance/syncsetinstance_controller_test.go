@@ -67,19 +67,20 @@ func TestSyncSetReconcile(t *testing.T) {
 	tenMinutesAgo := time.Unix(metav1.NewTime(time.Now().Add(-10*time.Minute)).Unix(), 0)
 
 	tests := []struct {
-		name                   string
-		status                 hivev1.SyncSetInstanceStatus
-		syncSet                *hivev1.SyncSet
-		deletedSyncSet         *hivev1.SyncSet
-		selectorSyncSet        *hivev1.SelectorSyncSet
-		deletedSelectorSyncSet *hivev1.SelectorSyncSet
-		existingObjs           []runtime.Object
-		clusterDeployment      *hivev1.ClusterDeployment
-		validate               func(*testing.T, *hivev1.SyncSetInstance)
-		isDeleted              bool
-		expectDeleted          []deletedItemInfo
-		expectSSIDeleted       bool
-		expectErr              bool
+		name                    string
+		status                  hivev1.SyncSetInstanceStatus
+		syncSet                 *hivev1.SyncSet
+		deletedSyncSet          *hivev1.SyncSet
+		selectorSyncSet         *hivev1.SelectorSyncSet
+		deletedSelectorSyncSet  *hivev1.SelectorSyncSet
+		existingObjs            []runtime.Object
+		clusterDeployment       *hivev1.ClusterDeployment
+		validate                func(*testing.T, *hivev1.SyncSetInstance)
+		isDeleted               bool
+		expectDeleted           []deletedItemInfo
+		expectSSIDeleted        bool
+		expectErr               bool
+		oldestResourceApplyTime time.Time
 	}{
 		{
 			name:    "Create single resource successfully",
@@ -563,6 +564,27 @@ func TestSyncSetReconcile(t *testing.T) {
 				deletedItem("bar", secretsResource),
 			},
 		},
+		{
+			name: "Requeue syncsetinstance for time until next resource apply",
+			existingObjs: []runtime.Object{
+				testSecret("s1", "value1"),
+				testSecret("s2", "value2"),
+				testSecret("s3", "value3"),
+			},
+			status: successfulSecretReferenceStatusWithTime(
+				[]runtime.Object{
+					testSecret("s1", "value1"),
+					testSecret("s2", "value2"),
+					testSecret("s3", "value3"),
+				},
+				metav1.NewTime(tenMinutesAgo)),
+			syncSet: testSyncSetWithSecretReferences("aaa",
+				testSecretRef("s1"),
+				testSecretRef("s2"),
+				testSecretRef("s3"),
+			),
+			oldestResourceApplyTime: tenMinutesAgo,
+		},
 	}
 
 	for _, test := range tests {
@@ -610,17 +632,31 @@ func TestSyncSetReconcile(t *testing.T) {
 					return dynamicClient, nil
 				},
 			}
-			_, err := r.Reconcile(reconcile.Request{
+
+			startReconcile := time.Now()
+			res, err := r.Reconcile(reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      ssi.Name,
 					Namespace: ssi.Namespace,
 				},
 			})
+			endReconcile := time.Now()
+
 			if !test.expectErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			} else if test.expectErr && err == nil {
 				t.Fatal("expected error not returned")
 			}
+
+			if !test.oldestResourceApplyTime.IsZero() {
+				top := reapplyInterval - startReconcile.Sub(test.oldestResourceApplyTime)
+				bottom := reapplyInterval - endReconcile.Sub(test.oldestResourceApplyTime)
+				t.Logf("TOP TIME: %v, ACTUAL TIME: %v, BOTTOM TIME: %v", top, res.RequeueAfter, bottom)
+				if top < res.RequeueAfter || bottom > res.RequeueAfter {
+					t.Fatalf("reconcile requeueAfter did not fall between expected time, actual: %v, expected between %v and %v", res.RequeueAfter, top, bottom)
+				}
+			}
+
 			validateDeletedItems(t, dynamicClient.deletedItems, test.expectDeleted)
 			if test.expectSSIDeleted {
 				result := &hivev1.SyncSetInstance{}
