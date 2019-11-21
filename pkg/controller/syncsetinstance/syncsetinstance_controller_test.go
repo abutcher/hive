@@ -648,10 +648,13 @@ func TestSyncSetReconcile(t *testing.T) {
 				t.Fatal("expected error not returned")
 			}
 
+			if test.expectErr && res.RequeueAfter != time.Duration(0) {
+				t.Fatalf("unexpected requeueAfter found after expected reconcile error: %v", res.RequeueAfter)
+			}
+
 			if !test.oldestResourceApplyTime.IsZero() {
 				top := reapplyInterval - startReconcile.Sub(test.oldestResourceApplyTime)
 				bottom := reapplyInterval - endReconcile.Sub(test.oldestResourceApplyTime)
-				t.Logf("TOP TIME: %v, ACTUAL TIME: %v, BOTTOM TIME: %v", top, res.RequeueAfter, bottom)
 				if top < res.RequeueAfter || bottom > res.RequeueAfter {
 					t.Fatalf("reconcile requeueAfter did not fall between expected time, actual: %v, expected between %v and %v", res.RequeueAfter, top, bottom)
 				}
