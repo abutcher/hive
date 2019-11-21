@@ -653,10 +653,10 @@ func TestSyncSetReconcile(t *testing.T) {
 			}
 
 			if !test.oldestResourceApplyTime.IsZero() {
-				top := reapplyInterval - startReconcile.Sub(test.oldestResourceApplyTime)
-				bottom := reapplyInterval - endReconcile.Sub(test.oldestResourceApplyTime)
-				if top < res.RequeueAfter || bottom > res.RequeueAfter {
-					t.Fatalf("reconcile requeueAfter did not fall between expected time, actual: %v, expected between %v and %v", res.RequeueAfter, top, bottom)
+				maxRequeueAfter := reapplyInterval - startReconcile.Sub(test.oldestResourceApplyTime)
+				minRequeueAfter := reapplyInterval - endReconcile.Sub(test.oldestResourceApplyTime)
+				if maxRequeueAfter < res.RequeueAfter || minRequeueAfter > res.RequeueAfter {
+					t.Fatalf("reconcile requeueAfter did not fall between expected time, actual: %v, expected between %v and %v", res.RequeueAfter, minRequeueAfter, maxRequeueAfter)
 				}
 			}
 
