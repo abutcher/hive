@@ -21,10 +21,11 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
-	"k8s.io/client-go/rest"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/rest"
 
 	"github.com/golang/mock/gomock"
 	log "github.com/sirupsen/logrus"
@@ -619,6 +620,7 @@ func TestSyncSetReconcile(t *testing.T) {
 				applierBuilder:                helper.newHelper,
 				hash:                          fakeHashFunc(t),
 				remoteClusterAPIClientBuilder: func(*hivev1.ClusterDeployment) remoteclient.Builder { return mockRemoteClientBuilder },
+				reapplyInterval:               2 * time.Hour,
 			}
 			_, err := r.Reconcile(reconcile.Request{
 				NamespacedName: types.NamespacedName{
@@ -1538,11 +1540,11 @@ func TestSSIReApplyDuration(t *testing.T) {
 
 	for i, oldestResourceApplyTime := range oldestResourceApplyTimes {
 		ssi.Status.Resources[i].Conditions[0].LastProbeTime = metav1.NewTime(oldestResourceApplyTime)
-		requeueAfter := ssiReApplyDuration(ssi)
+		requeueAfter := ssiReapplyDuration(ssi, defaultReapplyInterval)
 		endProbe := time.Now()
 
-		maxRequeueAfter := reapplyInterval - startProbe.Sub(oldestResourceApplyTime)
-		minRequeueAfter := reapplyInterval - endProbe.Sub(oldestResourceApplyTime)
+		maxRequeueAfter := defaultReapplyInterval - startProbe.Sub(oldestResourceApplyTime)
+		minRequeueAfter := defaultReapplyInterval - endProbe.Sub(oldestResourceApplyTime)
 		if maxRequeueAfter < requeueAfter || minRequeueAfter > requeueAfter {
 			t.Fatalf("requeueAfter did not fall between expected times, actual: %v, expected between %v and %v", requeueAfter, minRequeueAfter, maxRequeueAfter)
 		}

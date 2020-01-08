@@ -704,6 +704,8 @@ spec:
         env:
         - name: CLI_CACHE_DIR
           value: /var/cache/kubectl
+        - name: SYNCSET_REAPPLY_INTERVAL
+          value: 2h
         livenessProbe:
           httpGet:
             path: /debug/health
@@ -1195,6 +1197,12 @@ rules:
   - watch
   - create
   - update
+- apiGroups:
+  - hive.openshift.io
+  resources:
+  - hiveconfigs
+  verbs:
+  - get
 - apiGroups:
   - velero.io
   resources:
@@ -2869,6 +2877,11 @@ spec:
                     type: object
                 type: object
               type: array
+            syncSetReapplyInterval:
+              description: SyncSetReapplyInterval indicates how much time must pass
+                before SyncSet resources will be reapplied. The default reapply interval
+                is two hours ("2h").
+              type: string
           type: object
         status:
           properties:
