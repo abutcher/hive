@@ -28,6 +28,7 @@ import (
 	"github.com/golang/mock/gomock"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -43,6 +44,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -747,6 +749,8 @@ func validateDeletedItems(t *testing.T, actual, expected []deletedItemInfo) {
 }
 
 func testClusterDeployment() *hivev1.ClusterDeployment {
+	now := metav1.Now()
+	cdInstalledTimestamp := metav1.NewTime(now.Add(-time.Hour * 1))
 	cd := hivev1.ClusterDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testName,
@@ -766,6 +770,7 @@ func testClusterDeployment() *hivev1.ClusterDeployment {
 				Type:   hivev1.UnreachableCondition,
 				Status: corev1.ConditionFalse,
 			}},
+			InstalledTimestamp: &cdInstalledTimestamp,
 		},
 	}
 
@@ -1668,5 +1673,91 @@ func TestFilterApplyError(t *testing.T) {
 	err3 := "unable to parse"
 	if filterApplyError(err3) != err3 {
 		t.Errorf("expected error message to be unchanged")
+	}
+}
+
+func TestCDFirstSyncSetsSuccessTimestamp(t *testing.T) {
+	apis.AddToScheme(scheme.Scheme)
+
+	//now := metav1.Now()
+
+	cd := testClusterDeployment()
+
+	ss := testSyncSet
+	si := syncSetInstanceForSyncSet
+
+	ssa := ss("a", nil, nil)
+
+	syncSets := []runtime.Object{
+		ssa,
+		//ss("a"), ss("b"), ss("c"),
+	}
+
+	// truncate time to the second to match rfc3339
+	/*
+		firstAppliedTimes := []metav1.Time{
+			metav1.NewTime(now.Add(-time.Minute * 15).Truncate(time.Second)),
+			metav1.NewTime(now.Add(-time.Minute * 10).Truncate(time.Second)),
+			metav1.NewTime(now.Add(-time.Minute * 5).Truncate(time.Second)),
+		}
+	*/
+
+	sia := si(cd, ssa)
+	controllerutils.AddFinalizer(sia, hivev1.FinalizerSyncSetInstance)
+
+	/*
+		sib := si(cd, ssb)
+		sic := si(cd, ssc)
+		syncSetInstances := []runtime.Object{
+			sia, sib, sic,
+		}
+		for i, ssi := range syncSetInstances {
+			ssi.(*hivev1.SyncSetInstance).Status.FirstSuccessTimestamp = &firstAppliedTimes[i]
+		}
+	*/
+
+	objs := append(syncSets, sia)
+	objs = append(objs, cd)
+	fakeClient := fake.NewFakeClient(objs...)
+	dynamicClient := &fakeDynamicClient{}
+
+	helper := &fakeHelper{t: t}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+	mockRemoteClientBuilder := remoteclientmock.NewMockBuilder(mockCtrl)
+	mockRemoteClientBuilder.EXPECT().RESTConfig().Return(nil, nil).AnyTimes()
+	mockRemoteClientBuilder.EXPECT().BuildDynamic().Return(dynamicClient, nil).AnyTimes()
+	rss := &ReconcileSyncSetInstance{
+		Client:                        fakeClient,
+		scheme:                        scheme.Scheme,
+		logger:                        log.WithField("controller", "syncsetinstance"),
+		applierBuilder:                helper.newHelper,
+		hash:                          fakeHashFunc(t),
+		remoteClusterAPIClientBuilder: func(*hivev1.ClusterDeployment) remoteclient.Builder { return mockRemoteClientBuilder },
+		reapplyInterval:               2 * time.Hour,
+	}
+	_, err := rss.Reconcile(reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sia.Name,
+			Namespace: sia.Namespace,
+		},
+	})
+	require.NoError(t, err, "unexpected error from Reconcile")
+
+	uCD := &hivev1.ClusterDeployment{}
+	err = fakeClient.Get(context.TODO(), client.ObjectKey{Name: testName, Namespace: testNamespace}, uCD)
+	require.NoError(t, err, "unexpected error getting ClusterDeployment")
+
+	t.Logf("cd.status.firstsyncsetsuccesstimestamp: %s", uCD.Status.FirstSyncSetsSuccessTimestamp)
+
+	uSSI := &hivev1.SyncSetInstance{}
+	err = fakeClient.Get(context.TODO(), client.ObjectKey{Name: sia.Name, Namespace: sia.Namespace}, uSSI)
+	t.Logf("ssi.status.firstsuccesstimestamp: %s", uSSI.Status.FirstSuccessTimestamp)
+
+	if actualFirstSuccessTime := uCD.Status.FirstSyncSetsSuccessTimestamp; assert.NotNil(t, actualFirstSuccessTime, "expected first success timestamp to be set") {
+		//expectedFirstSuccessTime := *syncSetInstances[2].(*hivev1.SyncSetInstance).Status.FirstSuccessTimestamp
+		expectedFirstSuccessTime := *uSSI.Status.FirstSuccessTimestamp
+		assert.Equal(t, expectedFirstSuccessTime, *actualFirstSuccessTime, "unexpected first success timestamp")
 	}
 }

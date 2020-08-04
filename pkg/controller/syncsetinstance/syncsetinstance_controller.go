@@ -88,11 +88,19 @@ var (
 		},
 		[]string{"name"},
 	)
+	metricTimeToApplySyncSets = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hive_cluster_deployment_time_to_apply_all_syncsets_seconds",
+			Help:    "Time between cluster install complete and all syncsets applied.",
+			Buckets: []float64{60, 300, 600, 1200, 1800, 2400, 3000, 3600},
+		},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(metricTimeToApplySyncSet)
 	metrics.Registry.MustRegister(metricTimeToApplySelectorSyncSet)
+	metrics.Registry.MustRegister(metricTimeToApplySyncSets)
 }
 
 // Applier knows how to Apply, Patch and return Info for []byte arrays describing objects and patches.
@@ -347,6 +355,18 @@ func (r *ReconcileSyncSetInstance) Reconcile(request reconcile.Request) (reconci
 		return reconcile.Result{}, err
 	}
 
+	if cd.Status.FirstSyncSetsSuccessTimestamp == nil {
+		syncSetInstances, err := r.getRelatedSyncSetInstances(cd)
+		if err != nil {
+			ssiLog.WithError(err).Error("unable to list related sync set instances for cluster deployment")
+			return reconcile.Result{}, err
+		}
+		err = r.setClusterDeploymentFirstSyncSetsSuccessTimestamp(syncSetInstances, cd, ssiLog)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
 	ssiLog.Info("done reconciling syncsetinstance")
 	if applyErr != nil {
 		ssiLog.WithError(applyErr).Warn("failed to apply, requeueing")
@@ -408,6 +428,23 @@ func (r *ReconcileSyncSetInstance) getClusterDeployment(ssi *hivev1.SyncSetInsta
 		return nil, err
 	}
 	return cd, nil
+}
+
+func (r *ReconcileSyncSetInstance) getRelatedSyncSetInstances(cd *hivev1.ClusterDeployment) ([]*hivev1.SyncSetInstance, error) {
+	list := &hivev1.SyncSetInstanceList{}
+	err := r.Client.List(context.TODO(), list, client.InNamespace(cd.Namespace))
+	if err != nil {
+		return nil, err
+	}
+
+	syncSetInstances := []*hivev1.SyncSetInstance{}
+	for i, syncSetInstance := range list.Items {
+		if syncSetInstance.Spec.ClusterDeploymentRef.Name == cd.Name {
+			syncSetInstances = append(syncSetInstances, &list.Items[i])
+		}
+	}
+
+	return syncSetInstances, nil
 }
 
 func (r *ReconcileSyncSetInstance) addSyncSetInstanceFinalizer(ssi *hivev1.SyncSetInstance, ssiLog log.FieldLogger) error {
@@ -1077,6 +1114,30 @@ func (r *ReconcileSyncSetInstance) setDeletionFailedSyncCondition(resourceSyncCo
 		deletionFailedReason,
 		fmt.Sprintf("Failed to delete resource: %v", err),
 		controllerutils.UpdateConditionIfReasonOrMessageChange)
+}
+
+func (r *ReconcileSyncSetInstance) setClusterDeploymentFirstSyncSetsSuccessTimestamp(syncSetInstances []*hivev1.SyncSetInstance, cd *hivev1.ClusterDeployment, ssiLog log.FieldLogger) error {
+	ssiLog.Info("attempting to set cd first syncsets success timestamp")
+	lastSuccessTimestamp := &metav1.Time{}
+	for _, ssi := range syncSetInstances {
+		if ssi.Status.FirstSuccessTimestamp == nil {
+			return nil
+		}
+		if ssi.Status.FirstSuccessTimestamp.Time.After(lastSuccessTimestamp.Time) {
+			lastSuccessTimestamp = ssi.Status.FirstSuccessTimestamp
+		}
+	}
+	cd.Status.FirstSyncSetsSuccessTimestamp = lastSuccessTimestamp
+	ssiLog.Info("updating clusterdeployment status")
+	err := r.Status().Update(context.TODO(), cd)
+	if err != nil {
+		ssiLog.WithError(err).Log(controllerutils.LogLevel(err), "cannot update clusterdeployment status")
+		return err
+	}
+	allSyncSetsAppliedDuration := lastSuccessTimestamp.Time.Sub(cd.Status.InstalledTimestamp.Time)
+	ssiLog.Infof("allSyncSetsAppliedDuration: %f", allSyncSetsAppliedDuration.Seconds())
+	metricTimeToApplySyncSets.Observe(float64(allSyncSetsAppliedDuration.Seconds()))
+	return nil
 }
 
 func (r *ReconcileSyncSetInstance) resourceHash(data []byte) string {
