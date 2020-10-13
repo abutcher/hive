@@ -374,7 +374,7 @@ func (r *ReconcileClusterSync) Reconcile(request reconcile.Request) (reconcile.R
 
 	// Set clusterSync.Status.FirstSyncSetsSuccessTime
 	syncStatuses := append(syncStatusesForSyncSets, syncStatusesForSelectorSyncSets...)
-	if len(syncStatuses) > 0 && clusterSync.Status.FirstSuccessTime == nil {
+	if clusterSync.Status.FirstSuccessTime == nil {
 		r.setFirstSuccessTime(syncStatuses, cd, clusterSync, logger)
 	}
 
@@ -940,7 +940,9 @@ func (r *ReconcileClusterSync) setFirstSuccessTime(syncStatuses []hiveintv1alpha
 	if cd.Status.InstalledTimestamp == nil {
 		return
 	}
-	lastSuccessTime := &metav1.Time{}
+	// When len(syncStatuses) == 0, meaning there are no syncsets which apply to the cluster, we will use now as the last success time
+	now := metav1.Now()
+	lastSuccessTime := &now
 	for _, status := range syncStatuses {
 		if status.FirstSuccessTime == nil {
 			return
@@ -948,6 +950,9 @@ func (r *ReconcileClusterSync) setFirstSuccessTime(syncStatuses []hiveintv1alpha
 		if status.FirstSuccessTime.Time.After(lastSuccessTime.Time) {
 			lastSuccessTime = status.FirstSuccessTime
 		}
+	}
+	if len(syncStatuses) == 0 {
+		logger.Info("no sync statuses == no sync sets == using time of now")
 	}
 	clusterSync.Status.FirstSuccessTime = lastSuccessTime
 	allSyncSetsAppliedDuration := lastSuccessTime.Time.Sub(cd.Status.InstalledTimestamp.Time)
