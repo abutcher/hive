@@ -99,13 +99,27 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "start hibernating, syncsets not applied",
-			cd:   cdBuilder.Options(o.shouldHibernate).Build(),
+			cd:   cdBuilder.Options(o.shouldHibernate, testcd.InstalledTimestamp(time.Now())).Build(),
 			cs:   csBuilder.Options(testcs.WithNoFirstSuccessTime()).Build(),
 			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
 				cond := getHibernatingCondition(cd)
 				require.NotNil(t, cond)
 				assert.Equal(t, corev1.ConditionFalse, cond.Status)
 				assert.Equal(t, hivev1.SyncSetsNotAppliedReason, cond.Reason)
+			},
+		},
+		{
+			name: "start hibernating, syncsets not applied but 10 minutes have passed since cd install",
+			cd:   cdBuilder.Options(o.shouldHibernate, testcd.InstalledTimestamp(time.Now().Add(-15*time.Minute))).Build(),
+			cs:   csBuilder.Options(testcs.WithNoFirstSuccessTime()).Build(),
+			setupActuator: func(actuator *mock.MockHibernationActuator) {
+				actuator.EXPECT().StopMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(nil)
+			},
+			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
+				cond := getHibernatingCondition(cd)
+				require.NotNil(t, cond)
+				assert.Equal(t, corev1.ConditionTrue, cond.Status)
+				assert.Equal(t, hivev1.StoppingHibernationReason, cond.Reason)
 			},
 		},
 		{
@@ -429,13 +443,24 @@ func TestHibernateAfter(t *testing.T) {
 		{
 			name: "cluster due for hibernate but syncsets not applied",
 			cd: cdBuilder.Build(
+				testcd.WithHibernateAfter(8*time.Minute),
+				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 9*time.Hour)),
+				testcd.InstalledTimestamp(time.Now().Add(-8*time.Minute))),
+			cs: csBuilder.Options(
+				testcs.WithNoFirstSuccessTime(),
+			).Build(),
+			expectedPowerState: "",
+		},
+		{
+			name: "cluster due for hibernate, syncsets not applied but 10 minutes have passed since cd install",
+			cd: cdBuilder.Build(
 				testcd.WithHibernateAfter(8*time.Hour),
 				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 9*time.Hour)),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
 			cs: csBuilder.Options(
 				testcs.WithNoFirstSuccessTime(),
 			).Build(),
-			expectedPowerState: "",
+			expectedPowerState: hivev1.HibernatingClusterPowerState,
 		},
 	}
 

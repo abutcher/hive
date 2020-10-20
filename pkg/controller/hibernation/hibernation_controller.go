@@ -166,8 +166,10 @@ func (r *hibernationReconciler) Reconcile(request reconcile.Request) (result rec
 			return r.setHibernatingCondition(cd, hivev1.UnsupportedHibernationReason, msg, corev1.ConditionFalse, cdLog)
 		}
 		if syncSetsApplied, msg := r.syncSetsApplied(cd); !syncSetsApplied {
-			cdLog.Info("syncsets not applied")
-			return r.setHibernatingCondition(cd, hivev1.SyncSetsNotAppliedReason, msg, corev1.ConditionFalse, cdLog)
+			// Allow hibernation if 10 minutes have passed since cluster installed and syncsets still not applied
+			if cd.Status.InstalledTimestamp != nil && time.Now().Sub(cd.Status.InstalledTimestamp.Time).Minutes() < 10 {
+				return r.setHibernatingCondition(cd, hivev1.SyncSetsNotAppliedReason, msg, corev1.ConditionFalse, cdLog)
+			}
 		}
 	}
 
