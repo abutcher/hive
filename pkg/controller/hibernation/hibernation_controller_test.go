@@ -25,12 +25,10 @@ import (
 	machineapi "github.com/openshift/cluster-api/pkg/apis/machine/v1beta1"
 
 	hivev1 "github.com/openshift/hive/pkg/apis/hive/v1"
-	hiveintv1alpha1 "github.com/openshift/hive/pkg/apis/hiveinternal/v1alpha1"
 	"github.com/openshift/hive/pkg/controller/hibernation/mock"
 	"github.com/openshift/hive/pkg/remoteclient"
 	remoteclientmock "github.com/openshift/hive/pkg/remoteclient/mock"
 	testcd "github.com/openshift/hive/pkg/test/clusterdeployment"
-	testcs "github.com/openshift/hive/pkg/test/clustersync"
 	testgeneric "github.com/openshift/hive/pkg/test/generic"
 )
 
@@ -47,22 +45,17 @@ func TestReconcile(t *testing.T) {
 	corev1.AddToScheme(scheme)
 	batchv1.AddToScheme(scheme)
 	hivev1.AddToScheme(scheme)
-	hiveintv1alpha1.AddToScheme(scheme)
 	machineapi.AddToScheme(scheme)
 
 	cdBuilder := testcd.FullBuilder(namespace, cdName, scheme).Options(
 		testcd.Installed(),
 		testcd.WithClusterVersion("4.4.9"),
 	)
-	csBuilder := testcs.FullBuilder(namespace, cdName, scheme).Options(
-		testcs.WithFirstSuccessTime(time.Now().Add(-10 * time.Hour)),
-	)
 	o := clusterDeploymentOptions{}
 
 	tests := []struct {
 		name           string
 		cd             *hivev1.ClusterDeployment
-		cs             *hiveintv1alpha1.ClusterSync
 		setupActuator  func(actuator *mock.MockHibernationActuator)
 		setupCSRHelper func(helper *mock.MockcsrHelper)
 		setupRemote    func(builder *remoteclientmock.MockBuilder)
@@ -71,7 +64,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "cluster deleted",
 			cd:   cdBuilder.GenericOptions(testgeneric.Deleted()).Options(o.shouldHibernate).Build(),
-			cs:   csBuilder.Build(),
 			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
 				if getHibernatingCondition(cd) != nil {
 					t.Errorf("not expecting hibernating condition")
@@ -81,7 +73,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "cluster not installed",
 			cd:   cdBuilder.Options(o.notInstalled, o.shouldHibernate).Build(),
-			cs:   csBuilder.Build(),
 			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
 				require.Nil(t, getHibernatingCondition(cd))
 			},
@@ -89,7 +80,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "start hibernating, older version",
 			cd:   cdBuilder.Options(o.shouldHibernate, testcd.WithClusterVersion("4.3.11")).Build(),
-			cs:   csBuilder.Build(),
 			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
 				cond := getHibernatingCondition(cd)
 				require.NotNil(t, cond)
@@ -98,34 +88,8 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "start hibernating, syncsets not applied",
-			cd:   cdBuilder.Options(o.shouldHibernate, testcd.InstalledTimestamp(time.Now())).Build(),
-			cs:   csBuilder.Options(testcs.WithNoFirstSuccessTime()).Build(),
-			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
-				cond := getHibernatingCondition(cd)
-				require.NotNil(t, cond)
-				assert.Equal(t, corev1.ConditionFalse, cond.Status)
-				assert.Equal(t, hivev1.SyncSetsNotAppliedReason, cond.Reason)
-			},
-		},
-		{
-			name: "start hibernating, syncsets not applied but 10 minutes have passed since cd install",
-			cd:   cdBuilder.Options(o.shouldHibernate, testcd.InstalledTimestamp(time.Now().Add(-15*time.Minute))).Build(),
-			cs:   csBuilder.Options(testcs.WithNoFirstSuccessTime()).Build(),
-			setupActuator: func(actuator *mock.MockHibernationActuator) {
-				actuator.EXPECT().StopMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(nil)
-			},
-			validate: func(t *testing.T, cd *hivev1.ClusterDeployment) {
-				cond := getHibernatingCondition(cd)
-				require.NotNil(t, cond)
-				assert.Equal(t, corev1.ConditionTrue, cond.Status)
-				assert.Equal(t, hivev1.StoppingHibernationReason, cond.Reason)
-			},
-		},
-		{
 			name: "start hibernating",
 			cd:   cdBuilder.Options(o.shouldHibernate).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().StopMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(nil)
 			},
@@ -139,7 +103,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "fail to stop machines",
 			cd:   cdBuilder.Options(o.shouldHibernate).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().StopMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(fmt.Errorf("error"))
 			},
@@ -153,7 +116,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "stopping, machines have stopped",
 			cd:   cdBuilder.Options(o.shouldHibernate, o.stopping).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesStopped(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(true, nil)
 			},
@@ -167,7 +129,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "stopping, machines have not stopped",
 			cd:   cdBuilder.Options(o.shouldHibernate, o.stopping).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesStopped(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(false, nil)
 			},
@@ -181,7 +142,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "start resuming",
 			cd:   cdBuilder.Options(o.hibernating).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().StartMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(nil)
 			},
@@ -195,7 +155,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "fail to start machines",
 			cd:   cdBuilder.Options(o.hibernating).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().StartMachines(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(fmt.Errorf("error"))
 			},
@@ -209,7 +168,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "starting, machines have not started",
 			cd:   cdBuilder.Options(o.resuming).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesRunning(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(false, nil)
 			},
@@ -223,7 +181,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "starting, machines running, nodes ready",
 			cd:   cdBuilder.Options(o.resuming).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesRunning(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(true, nil)
 			},
@@ -241,7 +198,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "starting, machines running, unready node",
 			cd:   cdBuilder.Options(o.resuming).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesRunning(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(true, nil)
 			},
@@ -261,7 +217,6 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "starting, machines running, unready node, csrs to approve",
 			cd:   cdBuilder.Options(o.resuming).Build(),
-			cs:   csBuilder.Build(),
 			setupActuator: func(actuator *mock.MockHibernationActuator) {
 				actuator.EXPECT().MachinesRunning(gomock.Any(), gomock.Any(), gomock.Any()).Times(1).Return(true, nil)
 			},
@@ -314,7 +269,7 @@ func TestReconcile(t *testing.T) {
 				test.setupCSRHelper(mockCSRHelper)
 			}
 			actuators = []HibernationActuator{mockActuator}
-			c := fake.NewFakeClientWithScheme(scheme, test.cd, test.cs)
+			c := fake.NewFakeClientWithScheme(scheme, test.cd)
 
 			reconciler := hibernationReconciler{
 				Client: c,
@@ -347,14 +302,10 @@ func TestHibernateAfter(t *testing.T) {
 	scheme := runtime.NewScheme()
 	corev1.AddToScheme(scheme)
 	hivev1.AddToScheme(scheme)
-	hiveintv1alpha1.AddToScheme(scheme)
 
 	cdBuilder := testcd.FullBuilder(namespace, cdName, scheme).Options(
 		testcd.Installed(),
 		testcd.WithClusterVersion("4.4.9"),
-	)
-	csBuilder := testcs.FullBuilder(namespace, cdName, scheme).Options(
-		testcs.WithFirstSuccessTime(time.Now().Add(-10 * time.Hour)),
 	)
 	o := clusterDeploymentOptions{}
 
@@ -362,7 +313,6 @@ func TestHibernateAfter(t *testing.T) {
 		name          string
 		setupActuator func(actuator *mock.MockHibernationActuator)
 		cd            *hivev1.ClusterDeployment
-		cs            *hiveintv1alpha1.ClusterSync
 
 		expectRequeueAfter      time.Duration
 		expectedPowerState      hivev1.ClusterPowerState
@@ -373,7 +323,6 @@ func TestHibernateAfter(t *testing.T) {
 			cd: cdBuilder.Build(
 				testcd.WithHibernateAfter(8*time.Hour),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs:                 csBuilder.Build(),
 			expectedPowerState: hivev1.HibernatingClusterPowerState,
 		},
 		{
@@ -382,7 +331,6 @@ func TestHibernateAfter(t *testing.T) {
 				testcd.WithHibernateAfter(8*time.Hour),
 				testcd.WithClusterVersion("4.3.11"),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs:                      csBuilder.Build(),
 			expectedPowerState:      "",
 			expectedConditionReason: hivev1.UnsupportedHibernationReason,
 		},
@@ -392,9 +340,6 @@ func TestHibernateAfter(t *testing.T) {
 				testcd.WithHibernateAfter(8*time.Hour),
 				testcd.WithClusterVersion("4.3.11"),
 				testcd.InstalledTimestamp(time.Now().Add(-3*time.Hour))),
-			cs: csBuilder.Options(
-				testcs.WithFirstSuccessTime(time.Now().Add(-3 * time.Hour)),
-			).Build(),
 			expectedPowerState:      "",
 			expectedConditionReason: hivev1.UnsupportedHibernationReason,
 		},
@@ -403,7 +348,6 @@ func TestHibernateAfter(t *testing.T) {
 			cd: cdBuilder.Build(
 				testcd.WithHibernateAfter(12*time.Hour),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs:                 csBuilder.Build(),
 			expectRequeueAfter: 2 * time.Hour,
 			expectedPowerState: "",
 		},
@@ -413,7 +357,6 @@ func TestHibernateAfter(t *testing.T) {
 				testcd.WithHibernateAfter(8*time.Hour),
 				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 9*time.Hour)),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs:                 csBuilder.Build(),
 			expectedPowerState: hivev1.HibernatingClusterPowerState,
 		},
 		{
@@ -422,7 +365,6 @@ func TestHibernateAfter(t *testing.T) {
 				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 6*time.Hour)),
 				testcd.WithHibernateAfter(20*time.Hour),
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs:                 csBuilder.Build(),
 			expectRequeueAfter: 14 * time.Hour,
 			expectedPowerState: "",
 		},
@@ -436,31 +378,8 @@ func TestHibernateAfter(t *testing.T) {
 				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour)),
 				testcd.WithCondition(hibernatingCondition(corev1.ConditionTrue, hivev1.ResumingHibernationReason, 8*time.Hour)),
 				o.shouldRun),
-			cs:                 csBuilder.Build(),
 			expectedPowerState: hivev1.RunningClusterPowerState,
 			expectRequeueAfter: stateCheckInterval,
-		},
-		{
-			name: "cluster due for hibernate but syncsets not applied",
-			cd: cdBuilder.Build(
-				testcd.WithHibernateAfter(8*time.Minute),
-				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 9*time.Hour)),
-				testcd.InstalledTimestamp(time.Now().Add(-8*time.Minute))),
-			cs: csBuilder.Options(
-				testcs.WithNoFirstSuccessTime(),
-			).Build(),
-			expectedPowerState: "",
-		},
-		{
-			name: "cluster due for hibernate, syncsets not applied but 10 minutes have passed since cd install",
-			cd: cdBuilder.Build(
-				testcd.WithHibernateAfter(8*time.Hour),
-				testcd.WithCondition(hibernatingCondition(corev1.ConditionFalse, hivev1.RunningHibernationReason, 9*time.Hour)),
-				testcd.InstalledTimestamp(time.Now().Add(-10*time.Hour))),
-			cs: csBuilder.Options(
-				testcs.WithNoFirstSuccessTime(),
-			).Build(),
-			expectedPowerState: hivev1.HibernatingClusterPowerState,
 		},
 	}
 
@@ -476,7 +395,7 @@ func TestHibernateAfter(t *testing.T) {
 			mockBuilder := remoteclientmock.NewMockBuilder(ctrl)
 			mockCSRHelper := mock.NewMockcsrHelper(ctrl)
 			actuators = []HibernationActuator{mockActuator}
-			c := fake.NewFakeClientWithScheme(scheme, test.cd, test.cs)
+			c := fake.NewFakeClientWithScheme(scheme, test.cd)
 
 			reconciler := hibernationReconciler{
 				Client: c,

@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/client-go/util/workqueue"
 
@@ -26,7 +25,6 @@ import (
 	machineapi "github.com/openshift/cluster-api/pkg/apis/machine/v1beta1"
 
 	hivev1 "github.com/openshift/hive/pkg/apis/hive/v1"
-	hiveintv1alpha1 "github.com/openshift/hive/pkg/apis/hiveinternal/v1alpha1"
 	"github.com/openshift/hive/pkg/constants"
 	hivemetrics "github.com/openshift/hive/pkg/controller/metrics"
 	controllerutils "github.com/openshift/hive/pkg/controller/utils"
@@ -159,17 +157,10 @@ func (r *hibernationReconciler) Reconcile(request reconcile.Request) (result rec
 	shouldHibernate := cd.Spec.PowerState == hivev1.HibernatingClusterPowerState
 	hibernatingCondition := controllerutils.FindClusterDeploymentCondition(cd.Status.Conditions, hivev1.ClusterHibernatingCondition)
 
-	// Signal a problem if we should be hibernating or have requested hibernate after and the cluster does not support it or
-	// SyncSets have not yet been applied.
+	// Signal a problem if we should be hibernating or have requested hibernate after and the cluster does not support it.
 	if shouldHibernate || cd.Spec.HibernateAfter != nil {
-		if supported, msg := r.hibernationSupported(cd); !supported {
+		if supported, msg := r.canHibernate(cd); !supported {
 			return r.setHibernatingCondition(cd, hivev1.UnsupportedHibernationReason, msg, corev1.ConditionFalse, cdLog)
-		}
-		if syncSetsApplied, msg := r.syncSetsApplied(cd); !syncSetsApplied {
-			// Allow hibernation if 10 minutes have passed since cluster installed and syncsets still not applied
-			if cd.Status.InstalledTimestamp != nil && time.Now().Sub(cd.Status.InstalledTimestamp.Time).Minutes() < 10 {
-				return r.setHibernatingCondition(cd, hivev1.SyncSetsNotAppliedReason, msg, corev1.ConditionFalse, cdLog)
-			}
 		}
 	}
 
@@ -374,7 +365,7 @@ func (r *hibernationReconciler) getActuator(cd *hivev1.ClusterDeployment) Hibern
 	return nil
 }
 
-func (r *hibernationReconciler) hibernationSupported(cd *hivev1.ClusterDeployment) (bool, string) {
+func (r *hibernationReconciler) canHibernate(cd *hivev1.ClusterDeployment) (bool, string) {
 	if r.getActuator(cd) == nil {
 		return false, "Unsupported platform: no actuator to handle it"
 	}
@@ -390,18 +381,6 @@ func (r *hibernationReconciler) hibernationSupported(cd *hivev1.ClusterDeploymen
 		return false, fmt.Sprintf("Unsupported version, need version %s or greater", minimumClusterVersion.String())
 	}
 	return true, "Hibernation capable"
-}
-
-func (r *hibernationReconciler) syncSetsApplied(cd *hivev1.ClusterDeployment) (bool, string) {
-	clusterSync := &hiveintv1alpha1.ClusterSync{}
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: cd.Namespace, Name: cd.Name}, clusterSync)
-	if err != nil {
-		return false, fmt.Sprintf("could not get ClusterSync: %v", err)
-	}
-	if clusterSync.Status.FirstSuccessTime == nil {
-		return false, "Cluster SyncSets have not been applied"
-	}
-	return true, ""
 }
 
 func (r *hibernationReconciler) nodesReady(cd *hivev1.ClusterDeployment, remoteClient client.Client, logger log.FieldLogger) (bool, error) {

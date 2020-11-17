@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -26,6 +27,7 @@ import (
 
 	apihelpers "github.com/openshift/hive/pkg/apis/helpers"
 	hivev1 "github.com/openshift/hive/pkg/apis/hive/v1"
+	hiveintv1alpha1 "github.com/openshift/hive/pkg/apis/hiveinternal/v1alpha1"
 	"github.com/openshift/hive/pkg/clusterresource"
 	"github.com/openshift/hive/pkg/constants"
 	hivemetrics "github.com/openshift/hive/pkg/controller/metrics"
@@ -33,11 +35,12 @@ import (
 )
 
 const (
-	ControllerName             = hivev1.ClusterpoolControllerName
-	finalizer                  = "hive.openshift.io/clusters"
-	imageSetDependent          = "cluster image set"
-	pullSecretDependent        = "pull secret"
-	credentialsSecretDependent = "credentials secret"
+	ControllerName                   = hivev1.ClusterpoolControllerName
+	finalizer                        = "hive.openshift.io/clusters"
+	imageSetDependent                = "cluster image set"
+	pullSecretDependent              = "pull secret"
+	credentialsSecretDependent       = "credentials secret"
+	hibernateAfterSyncSetsNotApplied = time.Minute * 10
 )
 
 var (
@@ -90,6 +93,27 @@ func AddToManager(mgr manager.Manager, r *ReconcileClusterPool, concurrentReconc
 		return err
 	}
 
+	// Watch for changes to ClusterSyncs for ClusterDeployments originating from a pool
+	enqueuePoolForClusterSync := &handler.EnqueueRequestsFromMapFunc{
+		ToRequests: handler.ToRequestsFunc(
+			func(a handler.MapObject) []reconcile.Request {
+				cd := &hivev1.ClusterDeployment{}
+				if err := r.Client.Get(context.Background(), client.ObjectKey{Namespace: a.Object.(*hiveintv1alpha1.ClusterSync).Namespace, Name: a.Object.(*hiveintv1alpha1.ClusterSync).Name}, cd); err != nil {
+					r.logger.WithError(err).Log(controllerutils.LogLevel(err), "failed to get ClusterDeployment for ClusterSync")
+					return nil
+				}
+				cpKey := clusterPoolKey(cd)
+				if cpKey == nil {
+					return nil
+				}
+				return []reconcile.Request{{NamespacedName: *cpKey}}
+			},
+		),
+	}
+	if err := c.Watch(&source.Kind{Type: &hiveintv1alpha1.ClusterSync{}}, enqueuePoolForClusterSync); err != nil {
+		return err
+	}
+
 	// Watch for changes to ClusterClaims
 	enqueuePoolForClaim := &handler.EnqueueRequestsFromMapFunc{
 		ToRequests: handler.ToRequestsFunc(
@@ -126,7 +150,7 @@ type ReconcileClusterPool struct {
 
 // Reconcile reads the state of the ClusterPool, checks if we currently have enough ClusterDeployments waiting, and
 // attempts to reach the desired state if not.
-func (r *ReconcileClusterPool) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileClusterPool) Reconcile(request reconcile.Request) (result reconcile.Result, returnErr error) {
 	logger := controllerutils.BuildControllerLogger(ControllerName, "clusterPool", request.NamespacedName)
 	logger.Infof("reconciling cluster pool")
 	recobsrv := hivemetrics.NewReconcileObserver(ControllerName, logger)
@@ -217,6 +241,26 @@ func (r *ReconcileClusterPool) Reconcile(request reconcile.Request) (reconcile.R
 		return reconcile.Result{}, err
 	}
 
+	syncSetsNotAppliedCDs, err := r.hibernateReadyClusters(readyCDs)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	// requeue ClusterPools with SyncSets that have not been applied
+	if len(syncSetsNotAppliedCDs) > 0 {
+		defer func() {
+			largestDiff := time.Duration(0)
+			for _, cd := range syncSetsNotAppliedCDs {
+				expiry := cd.Status.InstalledTimestamp.Time.Add(hibernateAfterSyncSetsNotApplied)
+				if time.Until(expiry) > largestDiff {
+					largestDiff = time.Until(expiry)
+				}
+			}
+			logger.WithField("requeueAfter", largestDiff).Info("syncsets not applied for a cluster belonging to clusterpool, requeueing")
+			result.RequeueAfter = largestDiff
+			result.Requeue = true
+		}()
+	}
+
 	switch drift := reserveSize - int(clp.Spec.Size); {
 	// If too many, delete some.
 	case drift > 0:
@@ -232,6 +276,37 @@ func (r *ReconcileClusterPool) Reconcile(request reconcile.Request) (reconcile.R
 	}
 
 	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileClusterPool) hibernateReadyClusters(cds []*hivev1.ClusterDeployment) ([]*hivev1.ClusterDeployment, error) {
+	var syncSetsNotAppliedCDs []*hivev1.ClusterDeployment
+	now := time.Now()
+	for _, cd := range cds {
+		if cd.Status.InstalledTimestamp != nil && cd.Spec.PowerState != hivev1.HibernatingClusterPowerState {
+			if syncSetsApplied, err := r.syncSetsApplied(cd); syncSetsApplied || now.Sub(cd.Status.InstalledTimestamp.Time) > hibernateAfterSyncSetsNotApplied {
+				if err != nil {
+					return nil, err
+				}
+				r.logger.WithFields(log.Fields{"cd": cd.Name, "namespace": cd.Namespace}).Infof("cluster running but expected hibernated, hibernating")
+				cd.Spec.PowerState = hivev1.HibernatingClusterPowerState
+				if err = r.Update(context.Background(), cd); err != nil {
+					return nil, err
+				}
+			} else {
+				syncSetsNotAppliedCDs = append(syncSetsNotAppliedCDs, cd)
+			}
+		}
+	}
+	return syncSetsNotAppliedCDs, nil
+}
+
+func (r *ReconcileClusterPool) syncSetsApplied(cd *hivev1.ClusterDeployment) (bool, error) {
+	clusterSync := &hiveintv1alpha1.ClusterSync{}
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: cd.Namespace, Name: cd.Name}, clusterSync)
+	if err != nil {
+		return false, fmt.Errorf("could not get ClusterSync: %v", err)
+	}
+	return clusterSync.Status.FirstSuccessTime != nil, nil
 }
 
 func (r *ReconcileClusterPool) addClusters(
@@ -317,7 +392,6 @@ func (r *ReconcileClusterPool) createCluster(
 		}
 		poolRef := poolReference(clp)
 		cd.Spec.ClusterPoolRef = &poolRef
-		cd.Spec.PowerState = hivev1.HibernatingClusterPowerState
 		lastIndex := len(objs) - 1
 		objs[i], objs[lastIndex] = objs[lastIndex], objs[i]
 	}

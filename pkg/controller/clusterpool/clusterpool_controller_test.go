@@ -21,10 +21,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	hivev1 "github.com/openshift/hive/pkg/apis/hive/v1"
+	hiveinternalv1alpha1 "github.com/openshift/hive/pkg/apis/hiveinternal/v1alpha1"
 	controllerutils "github.com/openshift/hive/pkg/controller/utils"
 	testclaim "github.com/openshift/hive/pkg/test/clusterclaim"
 	testcd "github.com/openshift/hive/pkg/test/clusterdeployment"
 	testcp "github.com/openshift/hive/pkg/test/clusterpool"
+	testcs "github.com/openshift/hive/pkg/test/clustersync"
 	testgeneric "github.com/openshift/hive/pkg/test/generic"
 	testsecret "github.com/openshift/hive/pkg/test/secret"
 )
@@ -39,6 +41,7 @@ const (
 func TestReconcileClusterPool(t *testing.T) {
 	scheme := runtime.NewScheme()
 	hivev1.AddToScheme(scheme)
+	hiveinternalv1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 
 	poolBuilder := testcp.FullBuilder(testNamespace, testLeasePoolName, scheme).
@@ -51,14 +54,15 @@ func TestReconcileClusterPool(t *testing.T) {
 			testcp.WithImageSet(imageSetName),
 		)
 	cdBuilder := func(name string) testcd.Builder {
-		return testcd.FullBuilder(name, name, scheme).Options(
-			testcd.WithPowerState(hivev1.HibernatingClusterPowerState),
-		)
+		return testcd.FullBuilder(name, name, scheme)
 	}
 	unclaimedCDBuilder := func(name string) testcd.Builder {
 		return cdBuilder(name).Options(
 			testcd.WithUnclaimedClusterPoolReference(testNamespace, testLeasePoolName),
 		)
+	}
+	csBuilder := func(name string) testcs.Builder {
+		return testcs.FullBuilder(name, name, scheme)
 	}
 
 	tests := []struct {
@@ -77,6 +81,8 @@ func TestReconcileClusterPool(t *testing.T) {
 		expectedAssignedClaims             int
 		expectedUnassignedClaims           int
 		expectedLabels                     map[string]string // Tested on all clusters, so will not work if your test has pre-existing cds in the pool.
+		expectedHibernatedClusters         int
+		expectedRequeueAfter               time.Duration
 	}{
 		{
 			name: "create all clusters",
@@ -413,6 +419,47 @@ func TestReconcileClusterPool(t *testing.T) {
 			expectedAssignedClaims:   0,
 			expectedUnassignedClaims: 1,
 		},
+		{
+			name: "hibernate ready clusterdeployments",
+			existing: []runtime.Object{
+				poolBuilder.Build(testcp.WithSize(3)),
+				unclaimedCDBuilder("c1").Build(testcd.Installed(), testcd.InstalledTimestamp(time.Now().Add(-time.Minute*5))),
+				unclaimedCDBuilder("c2").Build(testcd.Installed(), testcd.InstalledTimestamp(time.Now().Add(-time.Minute*5))),
+				unclaimedCDBuilder("c3").Build(testcd.Installed(), testcd.InstalledTimestamp(time.Now().Add(-time.Minute*5))),
+				csBuilder("c1").Build(testcs.WithFirstSuccessTime(time.Now())),
+				csBuilder("c2").Build(testcs.WithFirstSuccessTime(time.Now())),
+				csBuilder("c3").Build(testcs.WithFirstSuccessTime(time.Now())),
+			},
+			expectedTotalClusters:      3,
+			expectedObservedSize:       3,
+			expectedObservedReady:      3,
+			expectedHibernatedClusters: 3,
+		},
+		{
+			name: "requeue pool when ready cluster cannot be hibernated",
+			existing: []runtime.Object{
+				poolBuilder.Build(testcp.WithSize(1)),
+				unclaimedCDBuilder("c1").Build(testcd.Installed(), testcd.InstalledTimestamp(time.Now().Add(-time.Minute*5))),
+				csBuilder("c1").Build(testcs.WithNoFirstSuccessTime()),
+			},
+			expectedTotalClusters:      1,
+			expectedObservedSize:       1,
+			expectedObservedReady:      1,
+			expectedHibernatedClusters: 0,
+			expectedRequeueAfter:       time.Duration(time.Minute * 5),
+		},
+		{
+			name: "hibernate cluster when sufficient time has passed but syncsets not applied",
+			existing: []runtime.Object{
+				poolBuilder.Build(testcp.WithSize(1)),
+				unclaimedCDBuilder("c1").Build(testcd.Installed(), testcd.InstalledTimestamp(time.Now().Add(-time.Minute*10))),
+				csBuilder("c1").Build(testcs.WithNoFirstSuccessTime()),
+			},
+			expectedTotalClusters:      1,
+			expectedObservedSize:       1,
+			expectedObservedReady:      1,
+			expectedHibernatedClusters: 1,
+		},
 	}
 
 	for _, test := range tests {
@@ -449,11 +496,17 @@ func TestReconcileClusterPool(t *testing.T) {
 				},
 			}
 
-			_, err := rcp.Reconcile(reconcileRequest)
+			result, err := rcp.Reconcile(reconcileRequest)
 			if test.expectError {
 				assert.Error(t, err, "expected error from reconcile")
 			} else {
 				assert.NoError(t, err, "expected no error from reconcile")
+			}
+
+			if test.expectedRequeueAfter == 0 {
+				assert.Zero(t, result.RequeueAfter, "expected empty requeue after")
+			} else {
+				assert.InDelta(t, test.expectedRequeueAfter, result.RequeueAfter, float64(10*time.Second), "unexpected requeue after")
 			}
 
 			cds := &hivev1.ClusterDeploymentList{}
@@ -468,14 +521,18 @@ func TestReconcileClusterPool(t *testing.T) {
 				}
 			}
 
+			hibernatedClusters := 0
 			for _, cd := range cds.Items {
-				assert.Equal(t, hivev1.HibernatingClusterPowerState, cd.Spec.PowerState, "expected cluster to be hibernating")
+				if cd.Spec.PowerState != "" && cd.Spec.PowerState == hivev1.HibernatingClusterPowerState {
+					hibernatedClusters++
+				}
 				if test.expectedLabels != nil {
 					for k, v := range test.expectedLabels {
 						assert.Equal(t, v, cd.Labels[k])
 					}
 				}
 			}
+			assert.Equal(t, test.expectedHibernatedClusters, hibernatedClusters, "unexpected hibernated clusters count")
 
 			pool := &hivev1.ClusterPool{}
 			err = fakeClient.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testLeasePoolName}, pool)
