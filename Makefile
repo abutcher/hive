@@ -110,6 +110,7 @@ endef
 crd: ensure-controller-gen ensure-yq
 	rm -rf ./config/crds
 	(cd apis; '../$(CONTROLLER_GEN)' crd:crdVersions=v1 paths=./hive/v1 paths=./hiveinternal/v1alpha1 output:dir=../config/crds)
+	cp ./config/cluster-api/*.yaml ./config/crds/
 	@echo Stripping yaml breaks from CRD files
 	$(foreach p,$(wildcard ./config/crds/*.yaml),$(call strip-yaml-break,$(p)))
 	@echo Patching CRD files for additional static information
