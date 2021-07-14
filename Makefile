@@ -10,6 +10,7 @@ include $(addprefix ./vendor/github.com/openshift/build-machinery-go/make/, \
 	targets/openshift/deps.mk \
 	targets/openshift/images.mk \
 	targets/openshift/kustomize.mk \
+	targets/openshift/imagebuilder.mk \
 )
 
 DOCKER_CMD ?= docker
