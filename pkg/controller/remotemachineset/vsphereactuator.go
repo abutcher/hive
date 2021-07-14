@@ -5,6 +5,7 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -44,6 +45,12 @@ func NewVSphereActuator(masterMachine *machineapi.Machine, scheme *runtime.Schem
 		osImage: osImage,
 	}
 	return actuator, nil
+}
+
+// GenerateCAPIMachineSets takes a clusterDeployment and returns a list of upstream CAPI MachineSets
+func (a *VSphereActuator) GenerateCAPIMachineSets(cd *hivev1.ClusterDeployment, pool *hivev1.MachinePool, logger log.FieldLogger) ([]*capiv1.MachineSet, bool, error) {
+	machinesets := []*capiv1.MachineSet{}
+	return machinesets, true, nil
 }
 
 // GenerateMachineSets satisfies the Actuator interface and will take a clusterDeployment and return a list of MachineSets

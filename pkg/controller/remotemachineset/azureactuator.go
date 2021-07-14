@@ -11,6 +11,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 
 	installazure "github.com/openshift/installer/pkg/asset/machines/azure"
 	installertypes "github.com/openshift/installer/pkg/types"
@@ -41,6 +42,12 @@ func NewAzureActuator(azureCreds *corev1.Secret, logger log.FieldLogger) (*Azure
 		logger: logger,
 	}
 	return actuator, nil
+}
+
+// GenerateCAPIMachineSets takes a clusterDeployment and returns a list of upstream CAPI MachineSets
+func (a *AzureActuator) GenerateCAPIMachineSets(cd *hivev1.ClusterDeployment, pool *hivev1.MachinePool, logger log.FieldLogger) ([]*capiv1.MachineSet, bool, error) {
+	machinesets := []*capiv1.MachineSet{}
+	return machinesets, true, nil
 }
 
 // GenerateMachineSets satisfies the Actuator interface and will take a clusterDeployment and return a list of MachineSets

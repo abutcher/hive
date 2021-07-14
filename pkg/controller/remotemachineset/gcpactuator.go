@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/pointer"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	installgcp "github.com/openshift/installer/pkg/asset/machines/gcp"
@@ -115,6 +116,12 @@ func NewGCPActuator(
 		leasesRequired: requireLeases(clusterVersion, remoteMachineSets, logger),
 	}
 	return actuator, nil
+}
+
+// GenerateCAPIMachineSets takes a clusterDeployment and returns a list of upstream CAPI MachineSets
+func (a *GCPActuator) GenerateCAPIMachineSets(cd *hivev1.ClusterDeployment, pool *hivev1.MachinePool, logger log.FieldLogger) ([]*capiv1.MachineSet, bool, error) {
+	machinesets := []*capiv1.MachineSet{}
+	return machinesets, true, nil
 }
 
 // GenerateMachineSets satisfies the Actuator interface and will take a clusterDeployment and return a list of MachineSets

@@ -23,6 +23,7 @@ import (
 	"k8s.io/utils/pointer"
 	awsproviderapis "sigs.k8s.io/cluster-api-provider-aws/pkg/apis"
 	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsprovider/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -106,19 +107,22 @@ func TestRemoteMachineSetReconcile(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                 string
-		clusterDeployment    *hivev1.ClusterDeployment
-		machinePool          *hivev1.MachinePool
-		remoteExisting       []runtime.Object
-		generatedMachineSets []*machineapi.MachineSet
-		actuatorDoNotProceed bool
-		expectErr            bool
-		expectNoFinalizer    bool
+		name                     string
+		clusterDeployment        *hivev1.ClusterDeployment
+		machinePool              *hivev1.MachinePool
+		remoteExisting           []runtime.Object
+		localExisting            []runtime.Object
+		generatedMachineSets     []*machineapi.MachineSet
+		generatedCAPIMachineSets []*capiv1.MachineSet
+		actuatorDoNotProceed     bool
+		expectErr                bool
+		expectNoFinalizer        bool
 		// expectPoolPresent is ignored if expectNoFinalizer is false
 		expectPoolPresent                bool
 		expectedRemoteMachineSets        []*machineapi.MachineSet
 		expectedRemoteMachineAutoscalers []autoscalingv1beta1.MachineAutoscaler
 		expectedRemoteClusterAutoscalers []autoscalingv1.ClusterAutoscaler
+		CAPI                             bool
 	}{
 		{
 			name: "Cluster not installed yet",
@@ -648,15 +652,39 @@ func TestRemoteMachineSetReconcile(t *testing.T) {
 				*testClusterAutoscaler("1"),
 			},
 		},
+		{
+			name: "CMM",
+			clusterDeployment: func() *hivev1.ClusterDeployment {
+				cd := testClusterDeployment()
+				cd.Spec.MachineManagement = &hivev1.MachineManagement{
+					Central: &hivev1.CentralMachineManagement{},
+				}
+				return cd
+			}(),
+			machinePool: testMachinePool(),
+			CAPI:        true,
+			remoteExisting: []runtime.Object{
+				testMachine("master1", "master"),
+			},
+			localExisting: []runtime.Object{
+				testCAPIMachineSet("foo-12345-worker-us-east-1a", "worker", true, 1, 0),
+			},
+			generatedCAPIMachineSets: []*capiv1.MachineSet{
+				testCAPIMachineSet("foo-12345-worker-us-east-1a", "worker", true, 1, 0),
+				testCAPIMachineSet("foo-12345-worker-us-east-1b", "worker", true, 1, 0),
+				testCAPIMachineSet("foo-12345-worker-us-east-1c", "worker", true, 1, 0),
+			},
+		},
 	}
 
 	for _, test := range tests {
 		apis.AddToScheme(scheme.Scheme)
+		capiv1.AddToScheme(scheme.Scheme)
 		machineapi.SchemeBuilder.AddToScheme(scheme.Scheme)
 		autoscalingv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 		autoscalingv1beta1.SchemeBuilder.AddToScheme(scheme.Scheme)
 		t.Run(test.name, func(t *testing.T) {
-			localExisting := []runtime.Object{}
+			localExisting := test.localExisting
 			if test.clusterDeployment != nil {
 				localExisting = append(localExisting, test.clusterDeployment)
 			}
@@ -670,10 +698,15 @@ func TestRemoteMachineSetReconcile(t *testing.T) {
 			defer mockCtrl.Finish()
 
 			mockActuator := mock.NewMockActuator(mockCtrl)
-			if test.generatedMachineSets != nil {
+			if !test.CAPI && test.generatedMachineSets != nil {
 				mockActuator.EXPECT().
 					GenerateMachineSets(test.clusterDeployment, test.machinePool, gomock.Any()).
 					Return(test.generatedMachineSets, !test.actuatorDoNotProceed, nil)
+			}
+			if test.CAPI && test.generatedCAPIMachineSets != nil {
+				mockActuator.EXPECT().
+					GenerateCAPIMachineSets(test.clusterDeployment, test.machinePool, gomock.Any()).
+					Return(test.generatedCAPIMachineSets, !test.actuatorDoNotProceed, nil)
 			}
 
 			mockRemoteClientBuilder := remoteclientmock.NewMockBuilder(mockCtrl)
@@ -979,6 +1012,22 @@ func testMachineSpec(machineType string) machineapi.MachineSpec {
 	}
 }
 
+func testCAPIMachineSpec(machineType string) capiv1.MachineSpec {
+	dataSecretName := fmt.Sprintf("%s-user-data", machineType)
+	return capiv1.MachineSpec{
+		Bootstrap: capiv1.Bootstrap{
+			DataSecretName: &dataSecretName,
+		},
+		ClusterName: testName,
+		InfrastructureRef: corev1.ObjectReference{
+			Namespace:  testName,
+			Name:       testName,
+			APIVersion: "infrastructure.cluster.x-k8s.io/v1alpha3",
+			Kind:       "AWSMachineTemplate",
+		},
+	}
+}
+
 func testMachine(name string, machineType string) *machineapi.Machine {
 	return &machineapi.Machine{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1039,6 +1088,39 @@ func testMachineSet(name string, machineType string, unstompedAnnotation bool, r
 		ms.Annotations = map[string]string{
 			"hive.openshift.io/unstomped": "true",
 		}
+	}
+	return &ms
+}
+
+func testCAPIMachineSet(name string, machineType string, unstompedAnnotation bool, replicas int, generation int) *capiv1.MachineSet {
+	msReplicas := int32(replicas)
+	ms := capiv1.MachineSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: capiv1.GroupVersion.String(),
+			Kind:       "MachineSet",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: machineAPINamespace,
+			Labels: map[string]string{
+				machinePoolNameLabel:                       machineType,
+				"machine.openshift.io/cluster-api-cluster": testInfraID,
+				constants.HiveManagedLabel:                 "true",
+			},
+			Generation: int64(generation),
+		},
+		Spec: capiv1.MachineSetSpec{
+			Replicas: &msReplicas,
+			Template: capiv1.MachineTemplateSpec{
+				ObjectMeta: capiv1.ObjectMeta{
+					Labels: map[string]string{
+						"machine.openshift.io/cluster-api-machineset": name,
+						"machine.openshift.io/cluster-api-cluster":    testInfraID,
+					},
+				},
+				Spec: testCAPIMachineSpec(machineType),
+			},
+		},
 	}
 	return &ms
 }

@@ -10,6 +10,7 @@ import (
 	v1beta1 "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
 	logrus "github.com/sirupsen/logrus"
 	reflect "reflect"
+	v1alpha4 "sigs.k8s.io/cluster-api/api/v1alpha4"
 )
 
 // MockActuator is a mock of Actuator interface
@@ -49,4 +50,20 @@ func (m *MockActuator) GenerateMachineSets(arg0 *v1.ClusterDeployment, arg1 *v1.
 func (mr *MockActuatorMockRecorder) GenerateMachineSets(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateMachineSets", reflect.TypeOf((*MockActuator)(nil).GenerateMachineSets), arg0, arg1, arg2)
+}
+
+// GenerateCAPIMachineSets mocks base method
+func (m *MockActuator) GenerateCAPIMachineSets(arg0 *v1.ClusterDeployment, arg1 *v1.MachinePool, arg2 logrus.FieldLogger) ([]*v1alpha4.MachineSet, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GenerateCAPIMachineSets", arg0, arg1, arg2)
+	ret0, _ := ret[0].([]*v1alpha4.MachineSet)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GenerateCAPIMachineSets indicates an expected call of GenerateCAPIMachineSets
+func (mr *MockActuatorMockRecorder) GenerateCAPIMachineSets(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateCAPIMachineSets", reflect.TypeOf((*MockActuator)(nil).GenerateCAPIMachineSets), arg0, arg1, arg2)
 }

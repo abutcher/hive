@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	openstackprovider "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis"
 	openstackproviderv1alpha1 "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis/openstackproviderconfig/v1alpha1"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	installosp "github.com/openshift/installer/pkg/asset/machines/openstack"
@@ -55,6 +56,12 @@ func NewOpenStackActuator(masterMachine *machineapi.Machine, scheme *runtime.Sch
 		kubeClient: kubeClient,
 	}
 	return actuator, nil
+}
+
+// GenerateCAPIMachineSets takes a clusterDeployment and returns a list of upstream CAPI MachineSets
+func (a *OpenStackActuator) GenerateCAPIMachineSets(cd *hivev1.ClusterDeployment, pool *hivev1.MachinePool, logger log.FieldLogger) ([]*capiv1.MachineSet, bool, error) {
+	machinesets := []*capiv1.MachineSet{}
+	return machinesets, true, nil
 }
 
 // GenerateMachineSets satisfies the Actuator interface and will take a clusterDeployment and return a list of MachineSets

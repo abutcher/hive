@@ -13,11 +13,13 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis"
 	awsproviderv1beta1 "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsprovider/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	installaws "github.com/openshift/installer/pkg/asset/machines/aws"
@@ -85,6 +87,105 @@ func NewAWSActuator(
 		amiID:     amiID,
 	}
 	return actuator, nil
+}
+
+// GenerateCAPIMachineSets takes a clusterDeployment and returns CAPI MachineSets
+func (a *AWSActuator) GenerateCAPIMachineSets(cd *hivev1.ClusterDeployment, pool *hivev1.MachinePool, logger log.FieldLogger) ([]*capiv1.MachineSet, bool, error) {
+	computePool := baseMachinePool(pool)
+	computePool.Platform.AWS = &installertypesaws.MachinePool{
+		AMIID:        a.amiID,
+		InstanceType: pool.Spec.Platform.AWS.InstanceType,
+		EC2RootVolume: installertypesaws.EC2RootVolume{
+			IOPS: pool.Spec.Platform.AWS.EC2RootVolume.IOPS,
+			Size: pool.Spec.Platform.AWS.EC2RootVolume.Size,
+			Type: pool.Spec.Platform.AWS.EC2RootVolume.Type,
+		},
+		Zones: pool.Spec.Platform.AWS.Zones,
+	}
+
+	if len(computePool.Platform.AWS.Zones) == 0 {
+		zones, err := a.fetchAvailabilityZones()
+		if err != nil {
+			return nil, false, errors.Wrap(err, "compute pool not providing list of zones and failed to fetch list of zones")
+		}
+		if len(zones) == 0 {
+			return nil, false, fmt.Errorf("zero zones returned for region %s", cd.Spec.Platform.AWS.Region)
+		}
+		computePool.Platform.AWS.Zones = zones
+	}
+
+	subnets := map[string]string{}
+	// Fetching private subnets from the machinepool and then mapping availability zones to subnets
+	if len(pool.Spec.Platform.AWS.Subnets) > 0 {
+		subnetsByAvailabilityZone, err := a.getPrivateSubnetsByAvailabilityZone(pool)
+		if err != nil {
+			return nil, false, errors.Wrap(err, "describing subnets")
+		}
+		subnets = subnetsByAvailabilityZone
+	}
+
+	total := int64(0)
+	if pool.Spec.Replicas != nil {
+		total = *pool.Spec.Replicas
+	}
+	numOfAZs := int64(len(computePool.Platform.AWS.Zones))
+
+	dataSecretName := fmt.Sprintf("%s-user-data", cd.Name)
+	machineSets := make([]*capiv1.MachineSet, len(computePool.Platform.AWS.Zones))
+	for i, zone := range computePool.Platform.AWS.Zones {
+		_, ok := subnets[zone]
+		if len(subnets) > 0 && !ok {
+			return machineSets, false, errors.Errorf("no subnet for zone %s", zone)
+		}
+
+		replicas := int32(total / numOfAZs)
+		if int64(i) < total%numOfAZs {
+			replicas++
+		}
+
+		name := fmt.Sprintf("%s-%s-%s", cd.Spec.ClusterMetadata.InfraID, computePool.Name, zone)
+		machineSet := &capiv1.MachineSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Namespace:   cd.Spec.MachineManagement.TargetNamespace,
+				Annotations: map[string]string{},
+				Labels:      map[string]string{},
+			},
+			TypeMeta: metav1.TypeMeta{},
+			Spec: capiv1.MachineSetSpec{
+				ClusterName: cd.Name,
+				Replicas:    &replicas,
+				Selector: metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						name: name,
+					},
+				},
+				Template: capiv1.MachineTemplateSpec{
+					ObjectMeta: capiv1.ObjectMeta{
+						Labels: map[string]string{
+							name:                    name,
+							capiv1.ClusterLabelName: cd.Spec.ClusterMetadata.InfraID,
+						},
+					},
+					Spec: capiv1.MachineSpec{
+						Bootstrap: capiv1.Bootstrap{
+							DataSecretName: &dataSecretName,
+						},
+						ClusterName: cd.Name,
+						InfrastructureRef: corev1.ObjectReference{
+							Namespace:  cd.Spec.MachineManagement.TargetNamespace,
+							Name:       name,
+							APIVersion: "infrastructure.cluster.x-k8s.io/v1alpha3",
+							Kind:       "AWSMachineTemplate",
+						},
+					},
+				},
+			},
+		}
+		machineSets[i] = machineSet
+	}
+	logger.Infof("generated %v machinesets", len(machineSets))
+	return machineSets, true, nil
 }
 
 // GenerateMachineSets satisfies the Actuator interface and will take a clusterDeployment and return a list of MachineSets

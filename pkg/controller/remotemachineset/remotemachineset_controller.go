@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -69,6 +70,9 @@ func Add(mgr manager.Manager) error {
 	logger := log.WithField("controller", ControllerName)
 
 	scheme := mgr.GetScheme()
+	if err := capiv1.AddToScheme(scheme); err != nil {
+		return errors.Wrap(err, "cannot add capiv1 to scheme")
+	}
 	if err := addAWSProviderToScheme(scheme); err != nil {
 		return errors.Wrap(err, "cannot add AWS provider to scheme")
 	}
@@ -307,6 +311,49 @@ func (r *ReconcileRemoteMachineSet) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{}, err
 	}
 
+	if cd.Spec.Platform.AWS != nil && cd.Spec.MachineManagement != nil && cd.Spec.MachineManagement.Central != nil {
+		logger.Info("reconciling local machinesets")
+		return r.reconcileLocalMachineSets(pool, cd, masterMachine, logger)
+	}
+
+	logger.Info("reconciling remote machinesets")
+	return r.reconcileRemoteMachineSets(pool, cd, masterMachine, remoteClusterAPIClient, logger)
+}
+
+func (r *ReconcileRemoteMachineSet) reconcileLocalMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, logger log.FieldLogger) (reconcile.Result, error) {
+	localMachineSets, err := r.getLocalMachineSets(logger)
+	if err != nil {
+		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not getLocalMachineSets")
+		return reconcile.Result{}, err
+	}
+
+	generatedMachineSets, proceed, err := r.generateCAPIMachineSets(pool, cd, masterMachine, localMachineSets, logger)
+	if err != nil {
+		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not generateCAPIMachineSets")
+		return reconcile.Result{}, err
+	} else if !proceed {
+		logger.Info("machineSets generator indicated not to proceed, returning")
+		return reconcile.Result{}, nil
+	}
+
+	switch result, err := r.ensureEnoughReplicasCAPI(pool, generatedMachineSets, cd, logger); {
+	case err != nil:
+		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not ensureEnoughReplicasCAPI")
+		return reconcile.Result{}, err
+	case result != nil:
+		return *result, nil
+	}
+
+	logger.Info("syncing machinesets")
+	_, err = r.syncCAPIMachineSets(pool, cd, generatedMachineSets, localMachineSets, logger)
+	if err != nil {
+		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not syncMachineSets")
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileRemoteMachineSet) reconcileRemoteMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, remoteClusterAPIClient client.Client, logger log.FieldLogger) (reconcile.Result, error) {
 	remoteMachineSets, err := r.getRemoteMachineSets(remoteClusterAPIClient, logger)
 	if err != nil {
 		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not getRemoteMachineSets")
@@ -400,6 +447,24 @@ func (r *ReconcileRemoteMachineSet) getRemoteMachineSets(
 	return remoteMachineSets, nil
 }
 
+func (r *ReconcileRemoteMachineSet) getLocalMachineSets(
+	logger log.FieldLogger,
+) (*capiv1.MachineSetList, error) {
+	localMachineSets := &capiv1.MachineSetList{}
+	if err := capiv1.AddToScheme(r.scheme); err != nil {
+		return nil, err
+	}
+	if err := r.Client.List(
+		context.Background(),
+		localMachineSets,
+	); err != nil {
+		logger.WithError(err).Error("unable to fetch local machine sets")
+		return nil, err
+	}
+	logger.Infof("found %v local machine sets", len(localMachineSets.Items))
+	return localMachineSets, nil
+}
+
 func (r *ReconcileRemoteMachineSet) generateMachineSets(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
@@ -417,7 +482,6 @@ func (r *ReconcileRemoteMachineSet) generateMachineSets(
 		return nil, false, err
 	}
 
-	// Generate expected MachineSets for Platform from InstallConfig
 	generatedMachineSets, proceed, err := actuator.GenerateMachineSets(cd, pool, logger)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "could not generate machinesets")
@@ -454,6 +518,38 @@ func (r *ReconcileRemoteMachineSet) generateMachineSets(
 	return generatedMachineSets, true, nil
 }
 
+func (r *ReconcileRemoteMachineSet) generateCAPIMachineSets(
+	pool *hivev1.MachinePool,
+	cd *hivev1.ClusterDeployment,
+	masterMachine *machineapi.Machine,
+	localMachineSets *capiv1.MachineSetList,
+	logger log.FieldLogger,
+) ([]*capiv1.MachineSet, bool, error) {
+	if pool.DeletionTimestamp != nil {
+		return nil, true, nil
+	}
+
+	dummyMachineSets := machineapi.MachineSetList{}
+	actuator, err := r.actuatorBuilder(cd, pool, masterMachine, dummyMachineSets.Items, logger)
+	if err != nil {
+		logger.WithError(err).Error("unable to create actuator")
+		return nil, false, err
+	}
+
+	logger.Info("generating CAPI machinesets")
+	generatedCAPIMachineSets, proceed, err := actuator.GenerateCAPIMachineSets(cd, pool, logger)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "could not generate machinesets")
+	} else if !proceed {
+		logger.Info("actuator indicated not to proceed, returning")
+	}
+	if generatedCAPIMachineSets == nil {
+		return nil, false, fmt.Errorf("didnt get any CAPI machinesets :)")
+	}
+
+	return generatedCAPIMachineSets, true, nil
+}
+
 // ensureEnoughReplicas ensures that the min replicas in the machine pool is
 // large enough to cover all of the zones for the machine pool. When using
 // auto-scaling for some platforms, every machineset needs to have a minimum replicas of 1.
@@ -465,6 +561,55 @@ func (r *ReconcileRemoteMachineSet) generateMachineSets(
 func (r *ReconcileRemoteMachineSet) ensureEnoughReplicas(
 	pool *hivev1.MachinePool,
 	generatedMachineSets []*machineapi.MachineSet,
+	cd *hivev1.ClusterDeployment,
+	logger log.FieldLogger,
+) (*reconcile.Result, error) {
+	if pool.Spec.Autoscaling == nil {
+		return nil, nil
+	}
+	if pool.Spec.Autoscaling.MinReplicas < int32(len(generatedMachineSets)) && !platformAllowsZeroAutoscalingMinReplicas(cd) {
+		logger.WithField("machinesets", len(generatedMachineSets)).
+			WithField("minReplicas", pool.Spec.Autoscaling.MinReplicas).
+			Warning("when auto-scaling, the MachinePool must have at least one replica for each MachineSet")
+		conds, changed := controllerutils.SetMachinePoolConditionWithChangeCheck(
+			pool.Status.Conditions,
+			hivev1.NotEnoughReplicasMachinePoolCondition,
+			corev1.ConditionTrue,
+			"MinReplicasTooSmall",
+			fmt.Sprintf("When auto-scaling, the MachinePool must have at least one replica for each MachineSet. The minReplicas must be at least %d", len(generatedMachineSets)),
+			controllerutils.UpdateConditionIfReasonOrMessageChange,
+		)
+		if changed {
+			pool.Status.Conditions = conds
+			if err := r.Status().Update(context.Background(), pool); err != nil {
+				logger.WithError(err).Error("failed to update MachinePool conditions")
+				return &reconcile.Result{}, err
+			}
+		}
+		return &reconcile.Result{}, nil
+	}
+	conds, changed := controllerutils.SetMachinePoolConditionWithChangeCheck(
+		pool.Status.Conditions,
+		hivev1.NotEnoughReplicasMachinePoolCondition,
+		corev1.ConditionFalse,
+		"EnoughReplicas",
+		"The MachinePool has sufficient replicas for each MachineSet",
+		controllerutils.UpdateConditionNever,
+	)
+	if changed {
+		pool.Status.Conditions = conds
+		err := r.Status().Update(context.Background(), pool)
+		if err != nil {
+			logger.WithError(err).Error("failed to update MachinePool conditions")
+		}
+		return &reconcile.Result{}, err
+	}
+	return nil, nil
+}
+
+func (r *ReconcileRemoteMachineSet) ensureEnoughReplicasCAPI(
+	pool *hivev1.MachinePool,
+	generatedMachineSets []*capiv1.MachineSet,
 	cd *hivev1.ClusterDeployment,
 	logger log.FieldLogger,
 ) (*reconcile.Result, error) {
@@ -639,6 +784,144 @@ func (r *ReconcileRemoteMachineSet) syncMachineSets(
 	for _, ms := range machineSetsToDelete {
 		logger.WithField("machineset", ms.Name).Info("deleting machineset")
 		if err := remoteClusterAPIClient.Delete(context.Background(), ms); err != nil {
+			logger.WithError(err).Error("unable to delete machine set")
+			return nil, err
+		}
+	}
+
+	logger.Info("done reconciling machine sets for machine pool")
+	return result, nil
+}
+
+func (r *ReconcileRemoteMachineSet) syncCAPIMachineSets(
+	pool *hivev1.MachinePool,
+	cd *hivev1.ClusterDeployment,
+	generatedMachineSets []*capiv1.MachineSet,
+	localMachineSets *capiv1.MachineSetList,
+	logger log.FieldLogger,
+) ([]*capiv1.MachineSet, error) {
+	result := make([]*capiv1.MachineSet, len(generatedMachineSets))
+
+	machineSetsToDelete := []*capiv1.MachineSet{}
+	machineSetsToCreate := []*capiv1.MachineSet{}
+	machineSetsToUpdate := []*capiv1.MachineSet{}
+
+	// Find MachineSets that need updating/creating
+	for i, ms := range generatedMachineSets {
+		found := false
+		for _, rMS := range localMachineSets.Items {
+			if ms.Name == rMS.Name {
+				found = true
+				objectModified := false
+				objectMetaModified := false
+				resourcemerge.EnsureObjectMeta(&objectMetaModified, &rMS.ObjectMeta, ms.ObjectMeta)
+				msLog := logger.WithField("machineset", rMS.Name)
+
+				if pool.Spec.Autoscaling == nil {
+					if *rMS.Spec.Replicas != *ms.Spec.Replicas {
+						msLog.WithFields(log.Fields{
+							"desired":  *ms.Spec.Replicas,
+							"observed": *rMS.Spec.Replicas,
+						}).Info("replicas out of sync")
+						rMS.Spec.Replicas = ms.Spec.Replicas
+						objectModified = true
+					}
+				} else {
+					// If minReplicas==maxReplicas, then the autoscaler will ignore the machineset,
+					// even if the replicas in the machineset is not equal to the min and max.
+					// To ensure that the replicas falls within min and max regardless, Hive needs
+					// to set the replicas to explicitly be within the desired range.
+					min, max := getMinMaxReplicasForCAPIMachineSet(pool, generatedMachineSets, i)
+					switch {
+					case rMS.Spec.Replicas == nil:
+						msLog.WithField("observed", nil).WithField("min", min).WithField("max", max).Info("setting replicas to min")
+						rMS.Spec.Replicas = &min
+						objectModified = true
+					case *rMS.Spec.Replicas < min:
+						msLog.WithField("observed", *rMS.Spec.Replicas).WithField("min", min).WithField("max", max).Info("setting replicas to min")
+						rMS.Spec.Replicas = &min
+						objectModified = true
+					case *rMS.Spec.Replicas > max:
+						msLog.WithField("observed", *rMS.Spec.Replicas).WithField("min", min).WithField("max", max).Info("setting replicas to max")
+						rMS.Spec.Replicas = &max
+						objectModified = true
+					default:
+						msLog.WithField("observed", *rMS.Spec.Replicas).WithField("min", min).WithField("max", max).Debug("replicas within range")
+					}
+				}
+
+				/*
+					// Update if the labels on the remote machineset are different than the labels on the generated machineset.
+					// If the length of both labels is zero, then they match, even if one is a nil map and the other is an empty map.
+					if rl, l := rMS.Spec.Template.Spec.Labels, ms.Spec.Template.Spec.Labels; (len(rl) != 0 || len(l) != 0) && !reflect.DeepEqual(rl, l) {
+						msLog.WithField("desired", l).WithField("observed", rl).Info("labels out of sync")
+						rMS.Spec.Template.Spec.Labels = l
+						objectModified = true
+					}
+
+					// Update if the taints on the remote machineset are different than the taints on the generated machineset.
+					// If the length of both taints is zero, then they match, even if one is a nil slice and the other is an empty slice.
+					if rt, t := rMS.Spec.Template.Spec.Taints, ms.Spec.Template.Spec.Taints; (len(rt) != 0 || len(t) != 0) && !reflect.DeepEqual(rt, t) {
+						msLog.WithField("desired", t).WithField("observed", rt).Info("taints out of sync")
+						rMS.Spec.Template.Spec.Taints = t
+						objectModified = true
+					}
+				*/
+
+				if objectMetaModified || objectModified {
+					rMS.Generation++
+					machineSetsToUpdate = append(machineSetsToUpdate, &rMS)
+				}
+
+				result[i] = &rMS
+				break
+			}
+		}
+
+		if !found {
+			machineSetsToCreate = append(machineSetsToCreate, ms)
+			result[i] = ms
+		}
+	}
+
+	// Find MachineSets that need deleting
+	for i, rMS := range localMachineSets.Items {
+		if !isControlledByMachinePool(cd, pool, &rMS) {
+			continue
+		}
+		delete := true
+		if pool.DeletionTimestamp == nil {
+			for _, ms := range generatedMachineSets {
+				if rMS.Name == ms.Name {
+					delete = false
+					break
+				}
+			}
+		}
+		if delete {
+			machineSetsToDelete = append(machineSetsToDelete, &localMachineSets.Items[i])
+		}
+	}
+
+	for _, ms := range machineSetsToCreate {
+		logger.WithField("machineset", ms.Name).Info("creating machineset")
+		if err := r.Client.Create(context.Background(), ms); err != nil {
+			logger.WithError(err).Error("unable to create machine set")
+			return nil, err
+		}
+	}
+
+	for _, ms := range machineSetsToUpdate {
+		logger.WithField("machineset", ms.Name).Info("updating machineset")
+		if err := r.Client.Update(context.Background(), ms); err != nil {
+			logger.WithError(err).Error("unable to update machine set")
+			return nil, err
+		}
+	}
+
+	for _, ms := range machineSetsToDelete {
+		logger.WithField("machineset", ms.Name).Info("deleting machineset")
+		if err := r.Client.Delete(context.Background(), ms); err != nil {
 			logger.WithError(err).Error("unable to delete machine set")
 			return nil, err
 		}
@@ -1043,6 +1326,22 @@ func (r *ReconcileRemoteMachineSet) removeFinalizer(pool *hivev1.MachinePool, lo
 }
 
 func getMinMaxReplicasForMachineSet(pool *hivev1.MachinePool, machineSets []*machineapi.MachineSet, machineSetIndex int) (min, max int32) {
+	noOfMachineSets := int32(len(machineSets))
+	min = pool.Spec.Autoscaling.MinReplicas / noOfMachineSets
+	if int32(machineSetIndex) < pool.Spec.Autoscaling.MinReplicas%noOfMachineSets {
+		min++
+	}
+	max = pool.Spec.Autoscaling.MaxReplicas / noOfMachineSets
+	if int32(machineSetIndex) < pool.Spec.Autoscaling.MaxReplicas%noOfMachineSets {
+		max++
+	}
+	if max < min {
+		max = min
+	}
+	return
+}
+
+func getMinMaxReplicasForCAPIMachineSet(pool *hivev1.MachinePool, machineSets []*capiv1.MachineSet, machineSetIndex int) (min, max int32) {
 	noOfMachineSets := int32(len(machineSets))
 	min = pool.Spec.Autoscaling.MinReplicas / noOfMachineSets
 	if int32(machineSetIndex) < pool.Spec.Autoscaling.MinReplicas%noOfMachineSets {
