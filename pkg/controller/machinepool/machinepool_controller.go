@@ -1,4 +1,4 @@
-package remotemachineset
+package machinepool
 
 import (
 	"bytes"
@@ -94,7 +94,7 @@ func Add(mgr manager.Manager) error {
 		return err
 	}
 
-	r := &ReconcileRemoteMachineSet{
+	r := &ReconcileMachinePool{
 		Client:       controllerutils.NewClientWithMetricsOrDie(mgr, ControllerName, &clientRateLimiter),
 		scheme:       mgr.GetScheme(),
 		logger:       logger,
@@ -145,7 +145,7 @@ func Add(mgr manager.Manager) error {
 	return nil
 }
 
-func (r *ReconcileRemoteMachineSet) clusterDeploymentWatchHandler(a client.Object) []reconcile.Request {
+func (r *ReconcileMachinePool) clusterDeploymentWatchHandler(a client.Object) []reconcile.Request {
 	retval := []reconcile.Request{}
 
 	cd := a.(*hivev1.ClusterDeployment)
@@ -174,10 +174,10 @@ func (r *ReconcileRemoteMachineSet) clusterDeploymentWatchHandler(a client.Objec
 	return retval
 }
 
-var _ reconcile.Reconciler = &ReconcileRemoteMachineSet{}
+var _ reconcile.Reconciler = &ReconcileMachinePool{}
 
-// ReconcileRemoteMachineSet reconciles the MachineSets generated from a ClusterDeployment object
-type ReconcileRemoteMachineSet struct {
+// ReconcileMachinePool reconciles the MachineSets generated from a ClusterDeployment object
+type ReconcileMachinePool struct {
 	client.Client
 	scheme *runtime.Scheme
 
@@ -203,7 +203,7 @@ type ReconcileRemoteMachineSet struct {
 
 // Reconcile reads that state of the cluster for a MachinePool object and makes changes to the
 // remote cluster MachineSets based on the state read
-func (r *ReconcileRemoteMachineSet) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileMachinePool) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	logger := controllerutils.BuildControllerLogger(ControllerName, "machinePool", request.NamespacedName)
 	logger.Info("reconciling machine pool")
 	recobsrv := hivemetrics.NewReconcileObserver(ControllerName, logger)
@@ -320,7 +320,7 @@ func (r *ReconcileRemoteMachineSet) Reconcile(ctx context.Context, request recon
 	return r.reconcileRemoteMachineSets(pool, cd, masterMachine, remoteClusterAPIClient, logger)
 }
 
-func (r *ReconcileRemoteMachineSet) reconcileLocalMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, logger log.FieldLogger) (reconcile.Result, error) {
+func (r *ReconcileMachinePool) reconcileLocalMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, logger log.FieldLogger) (reconcile.Result, error) {
 	localMachineSets, err := r.getLocalMachineSets(logger)
 	if err != nil {
 		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not getLocalMachineSets")
@@ -353,7 +353,7 @@ func (r *ReconcileRemoteMachineSet) reconcileLocalMachineSets(pool *hivev1.Machi
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileRemoteMachineSet) reconcileRemoteMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, remoteClusterAPIClient client.Client, logger log.FieldLogger) (reconcile.Result, error) {
+func (r *ReconcileMachinePool) reconcileRemoteMachineSets(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, masterMachine *machineapi.Machine, remoteClusterAPIClient client.Client, logger log.FieldLogger) (reconcile.Result, error) {
 	remoteMachineSets, err := r.getRemoteMachineSets(remoteClusterAPIClient, logger)
 	if err != nil {
 		logger.WithError(err).Log(controllerutils.LogLevel(err), "could not getRemoteMachineSets")
@@ -400,7 +400,7 @@ func (r *ReconcileRemoteMachineSet) reconcileRemoteMachineSets(pool *hivev1.Mach
 	return r.updatePoolStatusForMachineSets(pool, machineSets, remoteClusterAPIClient, logger)
 }
 
-func (r *ReconcileRemoteMachineSet) getMasterMachine(
+func (r *ReconcileMachinePool) getMasterMachine(
 	cd *hivev1.ClusterDeployment,
 	remoteClusterAPIClient client.Client,
 	logger log.FieldLogger,
@@ -428,7 +428,7 @@ func (r *ReconcileRemoteMachineSet) getMasterMachine(
 	return &remoteMachines.Items[0], nil
 }
 
-func (r *ReconcileRemoteMachineSet) getRemoteMachineSets(
+func (r *ReconcileMachinePool) getRemoteMachineSets(
 	remoteClusterAPIClient client.Client,
 	logger log.FieldLogger,
 ) (*machineapi.MachineSetList, error) {
@@ -447,7 +447,7 @@ func (r *ReconcileRemoteMachineSet) getRemoteMachineSets(
 	return remoteMachineSets, nil
 }
 
-func (r *ReconcileRemoteMachineSet) getLocalMachineSets(
+func (r *ReconcileMachinePool) getLocalMachineSets(
 	logger log.FieldLogger,
 ) (*capiv1.MachineSetList, error) {
 	localMachineSets := &capiv1.MachineSetList{}
@@ -465,7 +465,7 @@ func (r *ReconcileRemoteMachineSet) getLocalMachineSets(
 	return localMachineSets, nil
 }
 
-func (r *ReconcileRemoteMachineSet) generateMachineSets(
+func (r *ReconcileMachinePool) generateMachineSets(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	masterMachine *machineapi.Machine,
@@ -518,7 +518,7 @@ func (r *ReconcileRemoteMachineSet) generateMachineSets(
 	return generatedMachineSets, true, nil
 }
 
-func (r *ReconcileRemoteMachineSet) generateCAPIMachineSets(
+func (r *ReconcileMachinePool) generateCAPIMachineSets(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	masterMachine *machineapi.Machine,
@@ -558,7 +558,7 @@ func (r *ReconcileRemoteMachineSet) generateCAPIMachineSets(
 // a machine pool that will always fail with not enough replicas. There is
 // nothing that the controller can do with such a machine pool until the user
 // makes updates to the machine pool.
-func (r *ReconcileRemoteMachineSet) ensureEnoughReplicas(
+func (r *ReconcileMachinePool) ensureEnoughReplicas(
 	pool *hivev1.MachinePool,
 	generatedMachineSets []*machineapi.MachineSet,
 	cd *hivev1.ClusterDeployment,
@@ -607,7 +607,7 @@ func (r *ReconcileRemoteMachineSet) ensureEnoughReplicas(
 	return nil, nil
 }
 
-func (r *ReconcileRemoteMachineSet) ensureEnoughReplicasCAPI(
+func (r *ReconcileMachinePool) ensureEnoughReplicasCAPI(
 	pool *hivev1.MachinePool,
 	generatedMachineSets []*capiv1.MachineSet,
 	cd *hivev1.ClusterDeployment,
@@ -656,7 +656,7 @@ func (r *ReconcileRemoteMachineSet) ensureEnoughReplicasCAPI(
 	return nil, nil
 }
 
-func (r *ReconcileRemoteMachineSet) syncMachineSets(
+func (r *ReconcileMachinePool) syncMachineSets(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	generatedMachineSets []*machineapi.MachineSet,
@@ -793,7 +793,7 @@ func (r *ReconcileRemoteMachineSet) syncMachineSets(
 	return result, nil
 }
 
-func (r *ReconcileRemoteMachineSet) syncCAPIMachineSets(
+func (r *ReconcileMachinePool) syncCAPIMachineSets(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	generatedMachineSets []*capiv1.MachineSet,
@@ -931,7 +931,7 @@ func (r *ReconcileRemoteMachineSet) syncCAPIMachineSets(
 	return result, nil
 }
 
-func (r *ReconcileRemoteMachineSet) syncMachineAutoscalers(
+func (r *ReconcileMachinePool) syncMachineAutoscalers(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	machineSets []*machineapi.MachineSet,
@@ -1062,7 +1062,7 @@ func (r *ReconcileRemoteMachineSet) syncMachineAutoscalers(
 	return nil
 }
 
-func (r *ReconcileRemoteMachineSet) syncClusterAutoscaler(
+func (r *ReconcileMachinePool) syncClusterAutoscaler(
 	pool *hivev1.MachinePool,
 	cd *hivev1.ClusterDeployment,
 	remoteClusterAPIClient client.Client,
@@ -1122,7 +1122,7 @@ func (r *ReconcileRemoteMachineSet) syncClusterAutoscaler(
 	return nil
 }
 
-func (r *ReconcileRemoteMachineSet) updatePoolStatusForMachineSets(
+func (r *ReconcileMachinePool) updatePoolStatusForMachineSets(
 	pool *hivev1.MachinePool,
 	machineSets []*machineapi.MachineSet,
 	remoteClusterAPIClient client.Client,
@@ -1236,7 +1236,7 @@ func summarizeMachinesError(remoteClusterAPIClient client.Client, machineSet *ma
 	return "", ""
 }
 
-func (r *ReconcileRemoteMachineSet) createActuator(
+func (r *ReconcileMachinePool) createActuator(
 	cd *hivev1.ClusterDeployment,
 	pool *hivev1.MachinePool,
 	masterMachine *machineapi.Machine,
@@ -1313,7 +1313,7 @@ func isControlledByMachinePool(cd *hivev1.ClusterDeployment, pool *hivev1.Machin
 		obj.GetLabels()[machinePoolNameLabel] == pool.Spec.Name
 }
 
-func (r *ReconcileRemoteMachineSet) removeFinalizer(pool *hivev1.MachinePool, logger log.FieldLogger) (reconcile.Result, error) {
+func (r *ReconcileMachinePool) removeFinalizer(pool *hivev1.MachinePool, logger log.FieldLogger) (reconcile.Result, error) {
 	if !controllerutils.HasFinalizer(pool, finalizer) {
 		return reconcile.Result{}, nil
 	}

@@ -1,4 +1,4 @@
-package remotemachineset
+package machinepool
 
 import (
 	"context"
@@ -36,7 +36,7 @@ import (
 	hivev1 "github.com/openshift/hive/apis/hive/v1"
 	hivev1aws "github.com/openshift/hive/apis/hive/v1/aws"
 	"github.com/openshift/hive/pkg/constants"
-	"github.com/openshift/hive/pkg/controller/remotemachineset/mock"
+	"github.com/openshift/hive/pkg/controller/machinepool/mock"
 	"github.com/openshift/hive/pkg/remoteclient"
 	remoteclientmock "github.com/openshift/hive/pkg/remoteclient/mock"
 )
@@ -715,7 +715,7 @@ func TestRemoteMachineSetReconcile(t *testing.T) {
 			logger := log.WithField("controller", "remotemachineset")
 			controllerExpectations := controllerutils.NewExpectations(logger)
 
-			rcd := &ReconcileRemoteMachineSet{
+			rcd := &ReconcileMachinePool{
 				Client:                        fakeClient,
 				scheme:                        scheme.Scheme,
 				logger:                        logger,

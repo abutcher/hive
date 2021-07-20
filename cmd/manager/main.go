@@ -54,9 +54,9 @@ import (
 	"github.com/openshift/hive/pkg/controller/fakeclusterinstall"
 	"github.com/openshift/hive/pkg/controller/hibernation"
 	"github.com/openshift/hive/pkg/controller/machinemanagement"
+	"github.com/openshift/hive/pkg/controller/machinepool"
 	"github.com/openshift/hive/pkg/controller/metrics"
 	"github.com/openshift/hive/pkg/controller/remoteingress"
-	"github.com/openshift/hive/pkg/controller/remotemachineset"
 	"github.com/openshift/hive/pkg/controller/syncidentityprovider"
 	"github.com/openshift/hive/pkg/controller/unreachable"
 	"github.com/openshift/hive/pkg/controller/utils"
@@ -91,7 +91,7 @@ var controllerFuncs = map[hivev1.ControllerName]controllerSetupFunc{
 	fakeclusterinstall.ControllerName:   fakeclusterinstall.Add,
 	metrics.ControllerName:              metrics.Add,
 	remoteingress.ControllerName:        remoteingress.Add,
-	remotemachineset.ControllerName:     remotemachineset.Add,
+	machinepool.ControllerName:          machinepool.Add,
 	syncidentityprovider.ControllerName: syncidentityprovider.Add,
 	unreachable.ControllerName:          unreachable.Add,
 	velerobackup.ControllerName:         velerobackup.Add,
